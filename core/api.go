@@ -355,6 +355,10 @@ func (s *APIServer) handleRelaySend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "to, session_key, and message are required", http.StatusBadRequest)
 		return
 	}
+	if req.TimeoutSecs != nil && *req.TimeoutSecs < 0 {
+		http.Error(w, "timeout_secs must be >= 0", http.StatusBadRequest)
+		return
+	}
 
 	resp, err := s.relay.Send(r.Context(), req)
 	if err != nil {

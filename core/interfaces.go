@@ -83,6 +83,9 @@ When you need to communicate with another bot (e.g. ask another AI agent a quest
 
   cc-connect relay send --to <target_project> "<message>"
 
+Optional:
+  cc-connect relay send --timeout <seconds> --to <target_project> "<message>"
+
 IMPORTANT: <target_project> must be the EXACT project name from the /bind command output.
 Do NOT guess or modify the name — use it exactly as shown (e.g. "gemini", not "gemini-bot").
 

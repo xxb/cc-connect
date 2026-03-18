@@ -432,7 +432,10 @@ Cross-platform bot communication in group chats.
 
 ```bash
 cc-connect relay send --to gemini "What do you think about this architecture?"
+cc-connect relay send --timeout 300 --to gemini "Take your time with this one"
 ```
+
+Use `--timeout <seconds>` to override the configured relay timeout for a single request. Set `--timeout 0` to disable the relay timeout for that send.
 
 ---
 

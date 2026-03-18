@@ -173,10 +173,11 @@ func (rm *RelayManager) ListBoundBots(chatID, selfProject string) map[string]str
 
 // RelayRequest is the payload for a relay send.
 type RelayRequest struct {
-	From       string `json:"from"`        // source project name
-	To         string `json:"to"`          // target project name
-	SessionKey string `json:"session_key"` // source session key (contains platform + chatID)
-	Message    string `json:"message"`
+	From        string `json:"from"`        // source project name
+	To          string `json:"to"`          // target project name
+	SessionKey  string `json:"session_key"` // source session key (contains platform + chatID)
+	Message     string `json:"message"`
+	TimeoutSecs *int   `json:"timeout_secs,omitempty"` // optional per-request relay timeout override; 0 disables timeout
 }
 
 // RelayResponse is the result of a relay send.
@@ -230,7 +231,10 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 	}
 
 	// Execute relay: inject message into target engine and collect response
-	relayCtx, cancel := rm.relayContext(ctx)
+	relayCtx, cancel, err := rm.relayContext(ctx, req.TimeoutSecs)
+	if err != nil {
+		return nil, fmt.Errorf("relay: %w", err)
+	}
 	defer cancel()
 
 	response, err := targetEngine.HandleRelay(relayCtx, req.From, chatID, req.Message)
@@ -277,14 +281,30 @@ func truncateRelay(s string, maxLen int) string {
 	return string(runes[:maxLen]) + "…"
 }
 
-func (rm *RelayManager) relayContext(ctx context.Context) (context.Context, context.CancelFunc) {
+func (rm *RelayManager) relayContext(ctx context.Context, overrideSecs *int) (context.Context, context.CancelFunc, error) {
+	timeout, err := rm.resolveTimeout(overrideSecs)
+	if err != nil {
+		return nil, nil, err
+	}
+	if timeout <= 0 {
+		return ctx, func() {}, nil
+	}
+	nextCtx, cancel := context.WithTimeout(ctx, timeout)
+	return nextCtx, cancel, nil
+}
+
+func (rm *RelayManager) resolveTimeout(overrideSecs *int) (time.Duration, error) {
+	if overrideSecs != nil {
+		if *overrideSecs < 0 {
+			return 0, fmt.Errorf("timeout_secs must be >= 0")
+		}
+		return time.Duration(*overrideSecs) * time.Second, nil
+	}
+
 	rm.mu.RLock()
 	timeout := rm.timeout
 	rm.mu.RUnlock()
-	if timeout <= 0 {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, timeout)
+	return timeout, nil
 }
 
 func parseSessionKeyParts(sessionKey string) (platform, chatID string, err error) {
