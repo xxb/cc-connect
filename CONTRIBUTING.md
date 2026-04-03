@@ -28,6 +28,7 @@ We usually acknowledge new issues within about 1 to 2 business days. More comple
 ## Pull Requests
 
 - Follow the repo guidance in [`CLAUDE.md`](./CLAUDE.md) and [`AGENTS.md`](./AGENTS.md).
+- If you contribute through a personal fork, use the standard Git layout in [`docs/contributor-fork-workflow.md`](./docs/contributor-fork-workflow.md).
 - Run local validation before submitting. At minimum:
 
 ```bash
@@ -84,6 +85,7 @@ Commercial support, custom work, or enterprise inquiries can go through the same
 ## Pull Request
 
 - 请遵循仓库中的 [`CLAUDE.md`](./CLAUDE.md) 和 [`AGENTS.md`](./AGENTS.md)。
+- 如果你是通过个人 fork 参与贡献，请采用 [`docs/contributor-fork-workflow.md`](./docs/contributor-fork-workflow.md) 中约定的 Git 布局。
 - 提交前请先做本地验证，至少执行：
 
 ```bash

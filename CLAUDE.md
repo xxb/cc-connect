@@ -4,6 +4,21 @@
 
 CC-Connect is a bridge that connects AI coding agents (Claude Code, Codex, Gemini CLI, Cursor, etc.) with messaging platforms (Feishu/Lark, Telegram, Discord, Slack, DingTalk, WeChat Work, QQ, LINE). Users interact with their coding agent through their preferred messaging app.
 
+## Contributor Git Workflow
+
+This repo is commonly contributed to through a personal fork. AI assistants working in this repo should preserve the following Git layout unless the user explicitly asks for a different workflow:
+
+- `origin` = the contributor's personal fork (writable)
+- `upstream` = `chenhg5/cc-connect` (canonical repo, fetch-only)
+- local `main` tracks `upstream/main`
+- feature branches live on `origin/<branch>` and PRs target `upstream/main`
+- do **not** do feature work directly on `main`
+- set `upstream` push URL to `DISABLED` to avoid accidental pushes
+
+For fresh-machine bootstrap, remote normalization, and the standard fork/branch/PR flow, follow [`docs/contributor-fork-workflow.md`](./docs/contributor-fork-workflow.md).
+
+Before destructive Git operations such as `reset --hard`, branch deletion, or force-push, explain the impact and confirm with the user.
+
 ## Architecture
 
 ```
