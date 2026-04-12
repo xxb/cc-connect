@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -3968,14 +3969,32 @@ func replyFooterContextText(usage *ContextUsage, i18n *I18n) string {
 		}
 	}
 
-	used := usedTokens * 100 / usage.ContextWindow
-	if used < 0 {
-		used = 0
+	baseline := usage.BaselineTokens
+	if baseline < 0 {
+		baseline = 0
 	}
-	if used > 100 {
-		used = 100
+	if usage.ContextWindow <= baseline {
+		return i18n.Tf(MsgReplyFooterRemaining, 0)
 	}
-	return i18n.Tf(MsgReplyFooterRemaining, 100-used)
+
+	effectiveWindow := usage.ContextWindow - baseline
+	effectiveUsed := usedTokens - baseline
+	if effectiveUsed < 0 {
+		effectiveUsed = 0
+	}
+	remaining := effectiveWindow - effectiveUsed
+	if remaining < 0 {
+		remaining = 0
+	}
+
+	left := int(math.Round(float64(remaining) / float64(effectiveWindow) * 100))
+	if left < 0 {
+		left = 0
+	}
+	if left > 100 {
+		left = 100
+	}
+	return i18n.Tf(MsgReplyFooterRemaining, left)
 }
 
 func replyFooterWorkDir(session AgentSession, agent Agent, workspaceDir string) string {

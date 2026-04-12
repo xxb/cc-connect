@@ -15,6 +15,7 @@ import (
 )
 
 const codexRolloutTailBytes int64 = 1 << 20
+const codexContextBaselineTokens = 12000
 
 type codexTokenUsage struct {
 	TotalTokens           int `json:"totalTokens"`
@@ -89,6 +90,7 @@ func contextUsageFromParts(usedTokens, totalTokens, inputTokens, cachedInputToke
 	}
 	return &core.ContextUsage{
 		UsedTokens:            usedTokens,
+		BaselineTokens:        codexContextBaselineTokens,
 		TotalTokens:           totalTokens,
 		InputTokens:           inputTokens,
 		CachedInputTokens:     cachedInputTokens,

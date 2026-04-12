@@ -109,6 +109,9 @@ func TestAppServerSession_HandleThreadTokenUsageUpdatedCachesContextUsage(t *tes
 	if usage.UsedTokens != 41061 {
 		t.Fatalf("used tokens = %d, want 41061", usage.UsedTokens)
 	}
+	if usage.BaselineTokens != codexContextBaselineTokens {
+		t.Fatalf("baseline tokens = %d, want %d", usage.BaselineTokens, codexContextBaselineTokens)
+	}
 	if usage.TotalTokens != 41061 {
 		t.Fatalf("total tokens = %d, want 41061", usage.TotalTokens)
 	}

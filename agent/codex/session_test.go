@@ -177,6 +177,9 @@ func TestRefreshContextUsageFromRollout_UsesLastTokenCount(t *testing.T) {
 	if usage.UsedTokens != 181424 {
 		t.Fatalf("used tokens = %d, want 181424", usage.UsedTokens)
 	}
+	if usage.BaselineTokens != codexContextBaselineTokens {
+		t.Fatalf("baseline tokens = %d, want %d", usage.BaselineTokens, codexContextBaselineTokens)
+	}
 	if usage.TotalTokens != 181424 {
 		t.Fatalf("total tokens = %d, want 181424", usage.TotalTokens)
 	}

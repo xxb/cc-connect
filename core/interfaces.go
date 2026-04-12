@@ -359,7 +359,11 @@ type ContextUsageReporter interface {
 type ContextUsage struct {
 	// UsedTokens is the current token load to compare against ContextWindow when
 	// computing remaining context capacity for the next turn.
-	UsedTokens            int
+	UsedTokens int
+	// BaselineTokens is the portion of the context window always occupied by
+	// fixed runtime/system instructions and therefore excluded from user-visible
+	// "left" calculations when the agent provides it.
+	BaselineTokens        int
 	TotalTokens           int
 	InputTokens           int
 	CachedInputTokens     int

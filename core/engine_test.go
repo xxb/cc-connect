@@ -1058,9 +1058,10 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 		}},
 	}
 	agentSession.contextUsage = &ContextUsage{
-		UsedTokens:    181424,
-		TotalTokens:   50821769,
-		ContextWindow: 258400,
+		UsedTokens:     181424,
+		BaselineTokens: 12000,
+		TotalTokens:    50821769,
+		ContextWindow:  258400,
 	}
 	state := &interactiveState{
 		agentSession: agentSession,
@@ -1077,7 +1078,7 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*gpt-5.4 · xhigh · 30% left · ~/codes/cc-connect*"
+	want := "answer\n\n*gpt-5.4 · xhigh · 31% left · ~/codes/cc-connect*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
