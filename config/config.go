@@ -302,7 +302,7 @@ type ProjectConfig struct {
 	RunAsEnv []string `toml:"run_as_env,omitempty"`
 	// ShowContextIndicator: nil/true = append [ctx: ~N%] to assistant replies; false = hide.
 	ShowContextIndicator *bool `toml:"show_context_indicator,omitempty"`
-	// ReplyFooter: nil/false = disable; true = append a Codex-style footer
+	// ReplyFooter: nil/true = append a Codex-style footer; false = disable.
 	// (model/reasoning/usage/workdir, when available) to assistant replies.
 	ReplyFooter      *bool        `toml:"reply_footer,omitempty"`
 	InjectSender     *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
