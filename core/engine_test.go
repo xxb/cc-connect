@@ -1057,6 +1057,10 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 			}},
 		}},
 	}
+	agentSession.contextUsage = &ContextUsage{
+		TotalTokens:   14840,
+		ContextWindow: 258400,
+	}
 	state := &interactiveState{
 		agentSession: agentSession,
 		platform:     p,
@@ -1072,7 +1076,7 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*gpt-5.4 · xhigh · 100% left · ~/codes/cc-connect*"
+	want := "answer\n\n*gpt-5.4 · xhigh · 95% left · ~/codes/cc-connect*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -4778,6 +4782,7 @@ type controllableAgentSession struct {
 	reasoningEffort string
 	workDir         string
 	report          *UsageReport
+	contextUsage    *ContextUsage
 	usageErr        error
 }
 
@@ -4805,7 +4810,8 @@ func (s *controllableAgentSession) GetUsage(_ context.Context) (*UsageReport, er
 	}
 	return s.report, s.usageErr
 }
-func (s *controllableAgentSession) Alive() bool { return s.alive }
+func (s *controllableAgentSession) GetContextUsage() *ContextUsage { return s.contextUsage }
+func (s *controllableAgentSession) Alive() bool                    { return s.alive }
 func (s *controllableAgentSession) Close() error {
 	s.alive = false
 	close(s.events)

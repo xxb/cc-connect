@@ -47,12 +47,18 @@ type codexSession struct {
 	runtimeCfgEffort   string
 	runtimeCfgFetched  time.Time
 	runtimeCfgFetchErr error
+
+	contextMu    sync.RWMutex
+	contextUsage *core.ContextUsage
+	sessionFile  string
 }
 
 var codexSessionCloseTimeout = 8 * time.Second
 var codexSessionForceKillWait = 2 * time.Second
 var codexRuntimeConfigCacheTTL = 5 * time.Second
 var codexRuntimeConfigTimeout = 1500 * time.Millisecond
+var codexContextUsageRetryDelay = 50 * time.Millisecond
+var codexContextUsageRetryCount = 4
 
 func newCodexSession(ctx context.Context, workDir, model, effort, mode, resumeID, baseURL string, extraEnv []string) (*codexSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
@@ -295,11 +301,18 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 	case "thread.started":
 		if tid, ok := raw["thread_id"].(string); ok {
 			cs.threadID.Store(tid)
+			cs.contextMu.Lock()
+			cs.sessionFile = ""
+			cs.contextUsage = nil
+			cs.contextMu.Unlock()
 			slog.Debug("codexSession: thread started", "thread_id", tid)
 		}
 
 	case "turn.started":
 		cs.pendingMsgs = cs.pendingMsgs[:0]
+		cs.contextMu.Lock()
+		cs.contextUsage = nil
+		cs.contextMu.Unlock()
 		slog.Debug("codexSession: turn started")
 
 	case "item.started":
@@ -309,6 +322,7 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 		cs.handleItemCompleted(raw)
 
 	case "turn.completed":
+		cs.refreshContextUsageFromRollout()
 		cs.flushPendingAsText()
 		evt := core.Event{Type: core.EventResult, SessionID: cs.CurrentSessionID(), Done: true}
 		select {
@@ -733,6 +747,12 @@ func (cs *codexSession) Alive() bool {
 	return cs.alive.Load()
 }
 
+func (cs *codexSession) GetContextUsage() *core.ContextUsage {
+	cs.contextMu.RLock()
+	defer cs.contextMu.RUnlock()
+	return cloneContextUsage(cs.contextUsage)
+}
+
 func (cs *codexSession) runtimeConfig() (string, string) {
 	cs.runtimeCfgMu.Lock()
 	defer cs.runtimeCfgMu.Unlock()
@@ -758,6 +778,41 @@ func (cs *codexSession) runtimeConfig() (string, string) {
 		return cs.runtimeCfgModel, cs.runtimeCfgEffort
 	}
 	return "", ""
+}
+
+func (cs *codexSession) refreshContextUsageFromRollout() {
+	sessionID := strings.TrimSpace(cs.CurrentSessionID())
+	if sessionID == "" {
+		return
+	}
+
+	for attempt := 0; attempt < codexContextUsageRetryCount; attempt++ {
+		cs.contextMu.RLock()
+		cachedPath := cs.sessionFile
+		cs.contextMu.RUnlock()
+
+		usage, path, err := loadContextUsageFromRollout(cs.extraEnv, sessionID, cachedPath)
+		if err == nil && usage != nil {
+			cs.contextMu.Lock()
+			cs.sessionFile = path
+			cs.contextUsage = cloneContextUsage(usage)
+			cs.contextMu.Unlock()
+			return
+		}
+
+		if attempt == codexContextUsageRetryCount-1 {
+			if err != nil {
+				slog.Debug("codexSession: context usage unavailable", "thread_id", sessionID, "error", err)
+			}
+			return
+		}
+
+		select {
+		case <-time.After(codexContextUsageRetryDelay):
+		case <-cs.ctx.Done():
+			return
+		}
+	}
 }
 
 func (cs *codexSession) Close() error {

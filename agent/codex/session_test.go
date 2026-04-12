@@ -142,6 +142,49 @@ done
 	}
 }
 
+func TestRefreshContextUsageFromRollout_UsesRealTokenCount(t *testing.T) {
+	workDir := t.TempDir()
+	codexHome := filepath.Join(workDir, ".codex")
+	rolloutDir := filepath.Join(codexHome, "sessions", "2026", "04", "12")
+	if err := os.MkdirAll(rolloutDir, 0o755); err != nil {
+		t.Fatalf("mkdir rollout dir: %v", err)
+	}
+
+	sessionID := "019d8019-d05a-7612-ace2-db549494c0f9"
+	rolloutPath := filepath.Join(rolloutDir, "rollout-2026-04-12T05-11-08-"+sessionID+".jsonl")
+	rollout := strings.Join([]string{
+		`{"type":"session_meta","payload":{"id":"` + sessionID + `","cwd":"/tmp/project"}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex"}}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":14809,"cached_input_tokens":3456,"output_tokens":31,"reasoning_output_tokens":24,"total_tokens":14840},"last_token_usage":{"input_tokens":14809,"cached_input_tokens":3456,"output_tokens":31,"reasoning_output_tokens":24,"total_tokens":14840},"model_context_window":258400},"rate_limits":{"limit_id":"codex"}}}`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(rolloutPath, []byte(rollout), 0o644); err != nil {
+		t.Fatalf("write rollout: %v", err)
+	}
+
+	cs, err := newCodexSession(context.Background(), workDir, "", "", "", sessionID, []string{"CODEX_HOME=" + codexHome})
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer cs.Close()
+
+	cs.refreshContextUsageFromRollout()
+
+	usage := cs.GetContextUsage()
+	if usage == nil {
+		t.Fatal("GetContextUsage() = nil, want rollout token count")
+	}
+	if usage.TotalTokens != 14840 {
+		t.Fatalf("total tokens = %d, want 14840", usage.TotalTokens)
+	}
+	if usage.InputTokens != 14809 {
+		t.Fatalf("input tokens = %d, want 14809", usage.InputTokens)
+	}
+	if usage.ContextWindow != 258400 {
+		t.Fatalf("context window = %d, want 258400", usage.ContextWindow)
+	}
+}
+
 func TestSend_WithImages_PassesImageArgsAndDefaultPrompt(t *testing.T) {
 	workDir := t.TempDir()
 	binDir := filepath.Join(workDir, "bin")

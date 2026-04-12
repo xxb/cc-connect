@@ -349,6 +349,22 @@ type UsageCredits struct {
 	Balance    string
 }
 
+// ContextUsageReporter is an optional interface for running agent sessions that
+// can report real runtime context usage for the active conversation.
+type ContextUsageReporter interface {
+	GetContextUsage() *ContextUsage
+}
+
+// ContextUsage describes runtime context consumption for the active session.
+type ContextUsage struct {
+	TotalTokens           int
+	InputTokens           int
+	CachedInputTokens     int
+	OutputTokens          int
+	ReasoningOutputTokens int
+	ContextWindow         int
+}
+
 // ContextCompressor is an optional interface for agents that support
 // compressing/compacting the conversation context within a running session.
 // CompressCommand returns the native slash command (e.g. "/compact", "/compress")

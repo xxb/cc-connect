@@ -147,6 +147,7 @@ type appServerSession struct {
 
 	runtimeMu sync.RWMutex
 	usage     *core.UsageReport
+	context   *core.ContextUsage
 }
 
 const (
@@ -369,10 +370,22 @@ func (s *appServerSession) cachedUsage() *core.UsageReport {
 	return cloneUsageReport(s.usage)
 }
 
+func (s *appServerSession) cachedContextUsage() *core.ContextUsage {
+	s.runtimeMu.RLock()
+	defer s.runtimeMu.RUnlock()
+	return cloneContextUsage(s.context)
+}
+
 func (s *appServerSession) storeUsage(report *core.UsageReport) {
 	s.runtimeMu.Lock()
 	defer s.runtimeMu.Unlock()
 	s.usage = cloneUsageReport(report)
+}
+
+func (s *appServerSession) storeContextUsage(usage *core.ContextUsage) {
+	s.runtimeMu.Lock()
+	defer s.runtimeMu.Unlock()
+	s.context = cloneContextUsage(usage)
 }
 
 func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
@@ -508,6 +521,10 @@ func (s *appServerSession) GetUsage(ctx context.Context) (*core.UsageReport, err
 		return cached, nil
 	}
 	return nil, fmt.Errorf("codex app-server usage unavailable")
+}
+
+func (s *appServerSession) GetContextUsage() *core.ContextUsage {
+	return s.cachedContextUsage()
 }
 
 func (s *appServerSession) Alive() bool {
@@ -673,6 +690,7 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 			s.currentTurn = notif.Turn.ID
 			s.pendingMsgs = s.pendingMsgs[:0]
 			s.stateMu.Unlock()
+			s.storeContextUsage(nil)
 		}
 
 	case "item/started":
@@ -702,6 +720,12 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		var notif appServerRateLimitsResponse
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
 			s.storeUsage(mapAppServerRateLimits(notif))
+		}
+
+	case "thread/tokenUsage/updated":
+		var notif appServerThreadTokenUsageNotification
+		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
+			s.storeContextUsage(mapAppServerTokenUsage(notif))
 		}
 
 	case "error":

@@ -69,6 +69,54 @@ func TestAppServerSession_HandleRateLimitsUpdatedCachesUsage(t *testing.T) {
 	}
 }
 
+func TestAppServerSession_HandleThreadTokenUsageUpdatedCachesContextUsage(t *testing.T) {
+	s := &appServerSession{}
+	raw, err := json.Marshal(appServerThreadTokenUsageNotification{
+		ThreadID: "thread-1",
+		TurnID:   "turn-1",
+		TokenUsage: struct {
+			Total              codexTokenUsage `json:"total"`
+			Last               codexTokenUsage `json:"last"`
+			ModelContextWindow int             `json:"modelContextWindow"`
+		}{
+			Total: codexTokenUsage{
+				TotalTokens:           14840,
+				InputTokens:           14809,
+				CachedInputTokens:     3456,
+				OutputTokens:          31,
+				ReasoningOutputTokens: 24,
+			},
+			Last: codexTokenUsage{
+				TotalTokens:           14840,
+				InputTokens:           14809,
+				CachedInputTokens:     3456,
+				OutputTokens:          31,
+				ReasoningOutputTokens: 24,
+			},
+			ModelContextWindow: 258400,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal notification: %v", err)
+	}
+
+	s.handleNotification("thread/tokenUsage/updated", raw)
+
+	usage := s.GetContextUsage()
+	if usage == nil {
+		t.Fatal("GetContextUsage() = nil, want cached context usage")
+	}
+	if usage.TotalTokens != 14840 {
+		t.Fatalf("total tokens = %d, want 14840", usage.TotalTokens)
+	}
+	if usage.ContextWindow != 258400 {
+		t.Fatalf("context window = %d, want 258400", usage.ContextWindow)
+	}
+	if usage.CachedInputTokens != 3456 {
+		t.Fatalf("cached input tokens = %d, want 3456", usage.CachedInputTokens)
+	}
+}
+
 func TestMapAppServerRateLimits_PrefersMultiBucketView(t *testing.T) {
 	report := mapAppServerRateLimits(appServerRateLimitsResponse{
 		RateLimits: appServerRateLimitSnapshot{
@@ -107,4 +155,8 @@ func TestMapAppServerRateLimits_PrefersMultiBucketView(t *testing.T) {
 
 var _ interface {
 	GetUsage(context.Context) (*core.UsageReport, error)
+} = (*appServerSession)(nil)
+
+var _ interface {
+	GetContextUsage() *core.ContextUsage
 } = (*appServerSession)(nil)

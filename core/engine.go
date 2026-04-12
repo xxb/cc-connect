@@ -2748,7 +2748,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					cleanResponse += fmt.Sprintf("\n[ctx: ~%d%%]", selfPct)
 				}
 			}
-			if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, replyFooterContextText(contextEstimate, e.i18n)); footer != "" {
+			if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)); footer != "" {
 				cleanResponse = appendReplyFooter(cleanResponse, footer)
 			}
 			fullResponse = cleanResponse
@@ -3937,11 +3937,25 @@ func formatReplyFooterUsage(report *UsageReport, i18n *I18n) string {
 	return i18n.Tf(MsgReplyFooterRemaining, remaining)
 }
 
-func replyFooterContextText(estimatedTokens int, i18n *I18n) string {
-	if estimatedTokens <= 0 || i18n == nil {
+func replyFooterSessionContextUsage(session AgentSession) *ContextUsage {
+	if session == nil {
+		return nil
+	}
+	reporter, ok := session.(ContextUsageReporter)
+	if !ok {
+		return nil
+	}
+	return reporter.GetContextUsage()
+}
+
+func replyFooterContextText(usage *ContextUsage, i18n *I18n) string {
+	if usage == nil || i18n == nil {
 		return ""
 	}
-	used := estimatedTokens * 100 / modelContextWindow
+	if usage.ContextWindow <= 0 || usage.TotalTokens < 0 {
+		return ""
+	}
+	used := usage.TotalTokens * 100 / usage.ContextWindow
 	if used < 0 {
 		used = 0
 	}
@@ -10568,7 +10582,7 @@ func gitClone(repoURL, dest string) error {
 
 // ── Context usage indicator ──────────────────────────────────
 
-const modelContextWindow = 200_000 // Claude's context window size in tokens
+const modelContextWindow = 200_000 // generic fallback window for heuristic context estimates
 
 // contextIndicator returns a suffix like "\n[ctx: ~42%]" based on SDK-reported input tokens.
 func contextIndicator(inputTokens int) string {
