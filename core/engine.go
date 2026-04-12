@@ -2720,10 +2720,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			cleanResponse = strings.TrimRight(cleanResponse, "\n ")
 			baseResponse := cleanResponse
 
+			contextEstimate := estimateTokensWithPendingAssistant(session.GetHistory(0), baseResponse)
+
 			// Evaluate auto-compress trigger (token estimate on user+assistant text,
 			// including this turn's assistant reply before it is appended to history).
 			if e.autoCompressEnabled && e.autoCompressMaxTokens > 0 {
-				estimate := estimateTokensWithPendingAssistant(session.GetHistory(0), baseResponse)
+				estimate := contextEstimate
 				now := time.Now()
 				state.mu.Lock()
 				last := state.lastAutoCompressAt
@@ -2746,7 +2748,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					cleanResponse += fmt.Sprintf("\n[ctx: ~%d%%]", selfPct)
 				}
 			}
-			if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir); footer != "" {
+			if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, replyFooterContextText(contextEstimate, e.i18n)); footer != "" {
 				cleanResponse = appendReplyFooter(cleanResponse, footer)
 			}
 			fullResponse = cleanResponse
@@ -3826,7 +3828,7 @@ func (e *Engine) commandWorkDir(agent Agent, msg *Message) string {
 	return ""
 }
 
-func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDir string) string {
+func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDir string, contextLeft string) string {
 	if !e.replyFooterEnabled || agent == nil {
 		return ""
 	}
@@ -3838,7 +3840,9 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 	if effort := replyFooterReasoningEffort(session, agent); effort != "" {
 		parts = append(parts, effort)
 	}
-	if usage := e.replyFooterUsageText(session, agent); usage != "" {
+	if left := strings.TrimSpace(contextLeft); left != "" {
+		parts = append(parts, left)
+	} else if usage := e.replyFooterUsageText(session, agent); usage != "" {
 		parts = append(parts, usage)
 	}
 	if dir := replyFooterWorkDir(session, agent, workspaceDir); dir != "" {
@@ -3933,6 +3937,20 @@ func formatReplyFooterUsage(report *UsageReport, i18n *I18n) string {
 	return i18n.Tf(MsgReplyFooterRemaining, remaining)
 }
 
+func replyFooterContextText(estimatedTokens int, i18n *I18n) string {
+	if estimatedTokens <= 0 || i18n == nil {
+		return ""
+	}
+	used := estimatedTokens * 100 / modelContextWindow
+	if used < 0 {
+		used = 0
+	}
+	if used > 100 {
+		used = 100
+	}
+	return i18n.Tf(MsgReplyFooterRemaining, 100-used)
+}
+
 func replyFooterWorkDir(session AgentSession, agent Agent, workspaceDir string) string {
 	dir := strings.TrimSpace(workspaceDir)
 	if dir == "" {
@@ -4000,9 +4018,9 @@ func appendReplyFooter(content, footer string) string {
 	}
 	content = strings.TrimRight(content, "\n")
 	if content == "" {
-		return "`" + footer + "`"
+		return "*" + footer + "*"
 	}
-	return content + "\n\n`" + footer + "`"
+	return content + "\n\n*" + footer + "*"
 }
 
 func (e *Engine) cmdShow(p Platform, msg *Message, args []string) {
