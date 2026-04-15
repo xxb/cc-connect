@@ -185,6 +185,7 @@ type Engine struct {
 	rateLimiter      *RateLimiter
 	outgoingRL       *OutgoingRateLimiter
 	streamPreview    StreamPreviewCfg
+	references       ReferenceRenderCfg
 	relayManager     *RelayManager
 	eventIdleTimeout time.Duration
 	dirHistory       *DirHistory
@@ -207,6 +208,12 @@ type Engine struct {
 	workspacePool     *workspacePool
 	initFlows         map[string]*workspaceInitFlow // workspace channel key → init state
 	initFlowsMu       sync.Mutex
+
+	// Terminal observation (--observe)
+	observeEnabled    bool
+	observeProjectDir string             // ~/.claude/projects/{projectKey}
+	observeSessionKey string             // e.g. "slack:C123:U456" — target for forwarding
+	observeCancel     context.CancelFunc
 
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
@@ -339,6 +346,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		platformReady:         make(map[Platform]bool),
 		startedAt:             time.Now(),
 		streamPreview:         DefaultStreamPreviewCfg(),
+		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
 		showContextIndicator:  true,
 	}
@@ -437,6 +445,11 @@ func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
 	e.display = cfg
 }
 
+// SetReferenceConfig configures local reference normalization/rendering.
+func (e *Engine) SetReferenceConfig(cfg ReferenceRenderCfg) {
+	e.references = normalizeReferenceRenderCfg(cfg)
+}
+
 // estimateTokens provides a rough token estimate for a set of history entries.
 func estimateTokens(entries []HistoryEntry) int {
 	return estimateTokensWithPendingAssistant(entries, "")
@@ -504,8 +517,28 @@ func (e *Engine) SetAttachmentSendEnabled(v bool) {
 	e.attachmentSendEnabled = v
 }
 
+// SetObserveConfig enables terminal session observation.
+// projectDir is the Claude Code project directory containing session JSONL files.
+// sessionKey identifies the Slack channel to forward messages to.
+func (e *Engine) SetObserveConfig(projectDir, sessionKey string) {
+	e.observeEnabled = true
+	e.observeProjectDir = projectDir
+	e.observeSessionKey = sessionKey
+}
+
 func (e *Engine) SetLanguageSaveFunc(fn func(Language) error) {
 	e.i18n.SetSaveFunc(fn)
+}
+
+// findObserverTarget returns the first platform that implements ObserverTarget,
+// or nil if none do.
+func (e *Engine) findObserverTarget() ObserverTarget {
+	for _, p := range e.platforms {
+		if ot, ok := p.(ObserverTarget); ok {
+			return ot
+		}
+	}
+	return nil
 }
 
 func (e *Engine) SetProviderSaveFunc(fn func(providerName string) error) {
@@ -662,7 +695,7 @@ func (e *Engine) SetAdminFrom(adminFrom string) {
 	shellDisabled := e.disabledCmds["shell"]
 	e.userRolesMu.Unlock()
 	if af == "" && !shellDisabled {
-		slog.Warn("admin_from is not set — privileged commands (/shell, /dir, /restart, /upgrade) are blocked. "+
+		slog.Warn("admin_from is not set — privileged commands (/shell, /show, /dir, /restart, /upgrade) are blocked. "+
 			"Set admin_from in config to enable them, or use disabled_commands to hide them.",
 			"project", e.name)
 	}
@@ -671,6 +704,7 @@ func (e *Engine) SetAdminFrom(adminFrom string) {
 // privilegedCommands are commands that require admin_from authorization.
 var privilegedCommands = map[string]bool{
 	"shell":   true,
+	"show":    true,
 	"dir":     true,
 	"restart": true,
 	"upgrade": true,
@@ -918,6 +952,36 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		ModeOverride: job.Mode,
 	}
 
+	// Resolve workspace-specific agent and sessions for multi-workspace mode.
+	// Priority: job.WorkDir (explicit) > workspace binding > global agent fallback.
+	agent := e.agent
+	sessions := e.sessions
+	workspaceDir := ""
+
+	if e.multiWorkspace {
+		channelID := extractChannelID(sessionKey)
+		if channelID != "" {
+			workspace, _, err := e.resolveWorkspace(targetPlatform, channelID)
+			if err == nil && workspace != "" {
+				wsAgent, wsSessions, _, effectiveDir, err := e.workspaceContext(workspace, sessionKey)
+				if err == nil {
+					agent = wsAgent
+					sessions = wsSessions
+					workspaceDir = effectiveDir
+				}
+			}
+		}
+	}
+
+	if job.WorkDir != "" {
+		wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(job.WorkDir)
+		if err == nil {
+			agent = wsAgent
+			sessions = wsSessions
+			workspaceDir = job.WorkDir
+		}
+	}
+
 	useNewSession := false
 	if e.cronScheduler != nil {
 		useNewSession = e.cronScheduler.UsesNewSession(job)
@@ -927,22 +991,29 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 
 	if useNewSession {
 		msg.SessionKey = runSessionKey
-		session := e.sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
+		session := sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
 		if !session.TryLock() {
 			return fmt.Errorf("session %q is busy", runSessionKey)
 		}
 		iKey := fmt.Sprintf("%s#cron:%s", runSessionKey, session.ID)
-		e.processInteractiveMessageWith(effectivePlatform, msg, session, e.agent, e.sessions, iKey, "", runSessionKey)
+		if workspaceDir != "" {
+			iKey = workspaceDir + ":" + iKey
+		}
+		e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey)
 		e.cleanupInteractiveState(iKey)
 		return nil
 	}
 
-	session := e.sessions.GetOrCreateActive(sessionKey)
+	session := sessions.GetOrCreateActive(sessionKey)
 	if !session.TryLock() {
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
 
-	e.processInteractiveMessageWith(effectivePlatform, msg, session, e.agent, e.sessions, sessionKey, "", sessionKey)
+	iKey := sessionKey
+	if workspaceDir != "" {
+		iKey = workspaceDir + ":" + sessionKey
+	}
+	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
 	return nil
 }
 
@@ -1117,6 +1188,8 @@ func (e *Engine) Start() error {
 	if len(startErrs) == len(e.platforms) && len(e.platforms) > 0 {
 		return startErrs[0] // Return first error
 	}
+
+	e.startObserver()
 	return nil
 }
 
@@ -1127,6 +1200,10 @@ func (e *Engine) Stop() error {
 
 	// Cancel first so late lifecycle callbacks observe shutdown immediately.
 	e.cancel()
+
+	if e.observeCancel != nil {
+		e.observeCancel()
+	}
 
 	// Stop platforms after cancellation so they can unwind against the closed context.
 	var errs []error
@@ -1321,13 +1398,22 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	content := strings.TrimSpace(msg.Content)
-	if content == "" && len(msg.Images) == 0 && len(msg.Files) == 0 {
+	if content == "" && len(msg.Images) == 0 && len(msg.Files) == 0 && msg.Location == nil {
 		return
 	}
 
-	// Resolve aliases: check if the first word (or whole content) matches an alias
+	// Resolve aliases on user text BEFORE merging ExtraContent, so reply
+	// quotes and platform context survive alias resolution (PR #420 fix).
 	content = e.resolveAlias(content)
-	msg.Content = content
+	if msg.ExtraContent != "" {
+		if content == "" {
+			msg.Content = msg.ExtraContent
+		} else {
+			msg.Content = msg.ExtraContent + "\n" + content
+		}
+	} else {
+		msg.Content = content
+	}
 
 	// Rate limit check (per-user role-based, then global fallback)
 	if !e.checkRateLimit(msg) {
@@ -1384,13 +1470,14 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 				ws.Touch()
 			}
 
-			// Get or create the workspace's agent and session manager
-			wsAgent, wsSessions, err = e.getOrCreateWorkspaceAgent(workspace)
+			var effectiveWorkspace string
+			wsAgent, wsSessions, _, effectiveWorkspace, err = e.workspaceContext(workspace, msg.SessionKey)
 			if err != nil {
 				slog.Error("failed to create workspace agent", "workspace", workspace, "err", err)
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf("Failed to initialize workspace: %v", err))
 				return
 			}
+			resolvedWorkspace = effectiveWorkspace
 		}
 	}
 
@@ -1458,6 +1545,11 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		session = rotated
 	}
 
+	// Ensure an interactiveState entry exists before launching the async
+	// processor so messages arriving during session startup can be queued
+	// instead of dropped (issue #565).
+	e.ensureInteractiveStateForQueueing(interactiveKey, p, msg.ReplyCtx)
+
 	slog.Info("processing message",
 		"platform", msg.Platform,
 		"user", msg.UserName,
@@ -1490,6 +1582,20 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 		"threshold", e.resetOnIdle,
 	)
 
+	// Check if the old session has an agent process that needs graceful
+	// shutdown. If so, tell the user we're wrapping up before blocking.
+	e.interactiveMu.Lock()
+	state, hasState := e.interactiveStates[interactiveKey]
+	hasAgent := hasState && state != nil && state.agentSession != nil && state.agentSession.Alive()
+	e.interactiveMu.Unlock()
+
+	if hasAgent {
+		// Notify the user before the potentially long close. The close
+		// returns as soon as the process exits (usually seconds), but
+		// Stop hooks can take up to 120s.
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSessionClosingGraceful))
+	}
+
 	e.cleanupInteractiveState(interactiveKey)
 	session.UnlockWithoutUpdate()
 
@@ -1512,7 +1618,12 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	state, hasState := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
 
-	if !hasState || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
+	if !hasState || state == nil {
+		return false
+	}
+	// Allow queueing when agentSession is nil (session is starting up,
+	// issue #565). Only reject if the session was established and died.
+	if state.agentSession != nil && !state.agentSession.Alive() {
 		return false
 	}
 
@@ -1547,6 +1658,22 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	)
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
 	return true
+}
+
+// ensureInteractiveStateForQueueing creates a placeholder interactiveState
+// entry if none exists. This allows messages arriving while the agent session
+// is still starting up to be queued instead of dropped (issue #565).
+// The placeholder has agentSession==nil; getOrCreateInteractiveStateWith will
+// replace it with a fully initialized state once the agent process is spawned.
+func (e *Engine) ensureInteractiveStateForQueueing(key string, p Platform, replyCtx any) {
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	if _, ok := e.interactiveStates[key]; !ok {
+		e.interactiveStates[key] = &interactiveState{
+			platform: p,
+			replyCtx: replyCtx,
+		}
+	}
 }
 
 // drainOrphanedQueue is called when a message was queued but the drain loop
@@ -1977,6 +2104,22 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 			opts["mode"] = m
 		}
 	}
+	// Copy run_as_user (and run_as_env) for OS-level isolation. Without
+	// this, per-workspace agents silently bypass the project-level
+	// run_as_user config because their opts map is freshly constructed
+	// above, not inherited from the project-level opts that main.go
+	// already decorated. See cc-connect#496 and the cc-connect/core/runas.go
+	// preamble for why run_as_user has to survive this copy.
+	if ma, ok := e.agent.(interface{ GetRunAsUser() string }); ok {
+		if u := ma.GetRunAsUser(); u != "" {
+			opts["run_as_user"] = u
+		}
+	}
+	if ma, ok := e.agent.(interface{ GetRunAsEnv() []string }); ok {
+		if env := ma.GetRunAsEnv(); len(env) > 0 {
+			opts["run_as_env"] = env
+		}
+	}
 
 	agent, err := CreateAgent(e.agent.Name(), opts)
 	if err != nil {
@@ -2004,7 +2147,48 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	return agent, sessions, nil
 }
 
+func (e *Engine) resolveChannelWorkDir(workspace, interactiveKey string) string {
+	if e.projectState == nil {
+		return workspace
+	}
+	override := e.projectState.WorkspaceDirOverride(interactiveKey)
+	if override == "" {
+		return workspace
+	}
+	if info, err := os.Stat(override); err == nil && info.IsDir() {
+		return override
+	}
+	e.projectState.ClearWorkspaceDirOverride(interactiveKey)
+	e.projectState.Save()
+	return workspace
+}
+
+func (e *Engine) workspaceContext(workspace, sessionKey string) (Agent, *SessionManager, string, string, error) {
+	interactiveKey := workspace + ":" + sessionKey
+	effectiveDir := e.resolveChannelWorkDir(workspace, interactiveKey)
+	wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(effectiveDir)
+	if err != nil {
+		return nil, nil, "", "", err
+	}
+	return wsAgent, wsSessions, interactiveKey, effectiveDir, nil
+}
+
 // getOrCreateInteractiveStateWith accepts an optional agent override for multi-workspace mode.
+// adoptPendingFromPlaceholder copies pendingMessages from an existing placeholder
+// state to newState so queued messages are not lost when the map entry is replaced.
+// Must be called under interactiveMu.
+func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
+	if existing == nil || existing == newState {
+		return
+	}
+	existing.mu.Lock()
+	if len(existing.pendingMessages) > 0 {
+		newState.pendingMessages = existing.pendingMessages
+		existing.pendingMessages = nil
+	}
+	existing.mu.Unlock()
+}
+
 // When agentOverride is non-nil it is used instead of e.agent to start the session.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
 func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
@@ -2084,7 +2268,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// Check if context is already canceled (e.g. during shutdown/restart)
 	if e.ctx.Err() != nil {
 		slog.Debug("skipping session start: context canceled", "session_key", sessionKey)
-		state = &interactiveState{platform: p, replyCtx: replyCtx}
+		newState := &interactiveState{platform: p, replyCtx: replyCtx}
+		adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
+		state = newState
 		e.interactiveStates[sessionKey] = state
 		return state
 	}
@@ -2113,7 +2299,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		}
 		if err != nil {
 			slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
-			state = &interactiveState{platform: p, replyCtx: replyCtx}
+			newState := &interactiveState{platform: p, replyCtx: replyCtx}
+			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
+			state = newState
 			e.interactiveStates[sessionKey] = state
 			return state
 		}
@@ -2128,11 +2316,13 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		}
 	}
 
-	state = &interactiveState{
+	newState := &interactiveState{
 		agentSession: agentSession,
 		platform:     p,
 		replyCtx:     replyCtx,
 	}
+	adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
+	state = newState
 	e.interactiveStates[sessionKey] = state
 
 	slog.Info("session spawned", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "is_resume", isResume, "elapsed", startElapsed)
@@ -2144,6 +2334,10 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 // skipped if the map entry has been replaced by a different state — this prevents
 // a stale goroutine (still running after /new created a fresh Session object and
 // a new turn started on it) from accidentally destroying the replacement state.
+//
+// IMPORTANT: The state is deleted from the map AFTER the agent session is closed
+// to avoid race conditions where concurrent requests see an empty map while the
+// agent session is still being shut down (which can take up to 130s for Stop hooks).
 func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interactiveState) {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[sessionKey]
@@ -2152,7 +2346,11 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 		e.interactiveMu.Unlock()
 		return
 	}
-	delete(e.interactiveStates, sessionKey)
+	// Capture the agent session before any further processing
+	var agentSession AgentSession
+	if ok && state != nil {
+		agentSession = state.agentSession
+	}
 	e.interactiveMu.Unlock()
 
 	// Notify senders of any queued messages that will never be processed.
@@ -2161,9 +2359,25 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 		e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
 	}
 
-	if ok && state != nil && state.agentSession != nil {
-		e.closeAgentSessionWithTimeout(sessionKey, state.agentSession)
+	// Close the agent session BEFORE deleting from the map.
+	// This prevents race conditions where /stop during cleanup sees
+	// an empty map and reports "No execution in progress" while
+	// the agent session Close() is still blocking (up to 130s).
+	if agentSession != nil {
+		e.closeAgentSessionWithTimeout(sessionKey, agentSession)
 	}
+
+	// Now delete the state from the map after the session is closed.
+	e.interactiveMu.Lock()
+	// Re-check that the state hasn't been replaced during the close
+	currentState, currentOk := e.interactiveStates[sessionKey]
+	if currentOk && len(expected) > 0 && expected[0] != nil && currentState != expected[0] {
+		// Another turn has replaced the state during our close — don't delete it.
+		e.interactiveMu.Unlock()
+		return
+	}
+	delete(e.interactiveStates, sessionKey)
+	e.interactiveMu.Unlock()
 }
 
 func (e *Engine) closeAgentSessionAsync(sessionKey string, agentSession AgentSession) {
@@ -2177,6 +2391,14 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 	if agentSession == nil {
 		return
 	}
+
+	// Allow enough time for the agent's own graceful shutdown sequence:
+	// stdin close → Stop hooks (claude-mem summary etc.) → SIGTERM → SIGKILL.
+	// Claude Code's Stop hooks can take up to 120s (claude-mem uses a
+	// sonnet summarizer). The 130s budget covers the default 120s graceful
+	// phase + 5s SIGTERM + 5s buffer. The wait ends early if the process
+	// exits sooner — this is the ceiling, not the typical duration.
+	const closeTimeout = 130 * time.Second
 
 	slog.Debug("cleanupInteractiveState: closing agent session", "session", sessionKey)
 	closeStart := time.Now()
@@ -2192,8 +2414,9 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 		if elapsed := time.Since(closeStart); elapsed >= slowAgentClose {
 			slog.Warn("slow agent session close", "elapsed", elapsed, "session", sessionKey)
 		}
-	case <-time.After(10 * time.Second):
-		slog.Error("agent session close timed out (10s), abandoning", "session", sessionKey)
+	case <-time.After(closeTimeout):
+		slog.Error("agent session close timed out, abandoning",
+			"timeout", closeTimeout, "session", sessionKey)
 	}
 }
 
@@ -2218,8 +2441,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}()
 
 	state.mu.Lock()
-	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx)
-	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang())
+	workspaceDir := state.workspaceDir
+	workspaceRenderer := func(content string) string {
+		return e.renderOutgoingContentForWorkspace(state.platform, content, workspaceDir)
+	}
+	sendWorkspace := func(p Platform, replyCtx any, content string) {
+		e.sendForWorkspace(p, replyCtx, content, workspaceDir)
+	}
+	sendWorkspaceWithError := func(p Platform, replyCtx any, content string) error {
+		return e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
+	}
+	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
+	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
 	state.mu.Unlock()
 
 	// Idle timeout: 0 = disabled
@@ -2317,7 +2550,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						segment := strings.Join(textParts[segmentStart:], "")
 						if segment != "" {
 							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-								e.send(p, replyCtx, chunk)
+								sendWorkspace(p, replyCtx, chunk)
 							}
 						}
 					}
@@ -2330,12 +2563,20 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
 				thinkingMsg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
 				if !cp.AppendEvent(ProgressEntryThinking, preview, "", thinkingMsg) {
-					e.send(p, replyCtx, thinkingMsg)
+					sendWorkspace(p, replyCtx, thinkingMsg)
 				}
 			}
 
 		case EventToolUse:
 			toolCount++
+			// When tool messages are hidden, insert a visual break between text
+			// segments so the accumulated response doesn't run together.
+			if !e.display.ToolMessages && len(textParts) > segmentStart {
+				textParts = append(textParts, "\n\n")
+				if sp.canPreview() {
+					sp.appendText("\n\n")
+				}
+			}
 			if e.display.ToolMessages {
 				// Flush accumulated text segment before tool display
 				previewActive := sp.canPreview()
@@ -2344,7 +2585,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						segment := strings.Join(textParts[segmentStart:], "")
 						if segment != "" {
 							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-								e.send(p, replyCtx, chunk)
+								sendWorkspace(p, replyCtx, chunk)
 							}
 						}
 					}
@@ -2375,7 +2616,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				toolMsg := fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput)
 				if !cp.AppendEvent(ProgressEntryToolUse, toolInput, event.ToolName, toolMsg) {
 					for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
-						e.send(p, replyCtx, chunk)
+						sendWorkspace(p, replyCtx, chunk)
 					}
 				}
 			}
@@ -2401,7 +2642,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 					if !cp.AppendStructured(entry, resultMsg) {
 						if !SuppressStandaloneToolResultEvent(p) {
-							e.send(p, replyCtx, resultMsg)
+							e.sendRaw(p, replyCtx, resultMsg)
 						}
 					}
 				}
@@ -2447,7 +2688,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					segment := strings.Join(textParts[segmentStart:], "")
 					if segment != "" {
 						for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-							e.send(p, replyCtx, chunk)
+							sendWorkspace(p, replyCtx, chunk)
 						}
 					}
 				}
@@ -2504,12 +2745,23 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventResult:
 			cp.Finalize(ProgressCardStateCompleted)
-			if event.SessionID != "" {
-				session.SetAgentSessionID(event.SessionID, e.agent.Name())
+			// Use state.agentSession.CurrentSessionID() instead of event.SessionID.
+			// event.SessionID may be empty in some cases, causing the agent_session_id
+			// to not be persisted to disk, breaking session resume on next startup.
+			if state != nil && state.agentSession != nil {
+				if currentID := state.agentSession.CurrentSessionID(); currentID != "" {
+					session.SetAgentSessionID(currentID, e.agent.Name())
+					sessions.Save()
+				}
 			}
 
 			fullResponse := event.Content
-			if fullResponse == "" && len(textParts) > 0 {
+			// When tool progress is hidden, segmentStart stays 0 and textParts
+			// contains ALL text across tool boundaries. Prefer the full accumulated
+			// text over event.Content which only contains the last assistant segment.
+			if len(textParts) > 0 && segmentStart == 0 {
+				fullResponse = strings.Join(textParts, "")
+			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}
 			if fullResponse == "" {
@@ -2578,7 +2830,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					unsent := strings.Join(textParts[segmentStart:], "")
 					if unsent != "" {
 						for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
-							if err := e.sendWithError(p, replyCtx, chunk); err != nil {
+							if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 								return
 							}
 						}
@@ -2592,7 +2844,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			} else {
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
 				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-					if err := e.sendWithError(p, replyCtx, chunk); err != nil {
+					if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 						return
 					}
 				}
@@ -2696,8 +2948,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				turnStart = time.Now()
 				firstEventLogged = false
 				waitStart = time.Now()
-				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx)
-				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang())
+				queuedRenderer := func(content string) string {
+					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
+				}
+				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
+				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
 
 				session.AddHistory("user", queued.content)
 
@@ -2763,7 +3018,7 @@ channelClosed:
 				unsent := strings.Join(textParts[segmentStart:], "")
 				if unsent != "" {
 					for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
-						if err := e.sendWithError(p, replyCtx, chunk); err != nil {
+						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 							return
 						}
 					}
@@ -2773,7 +3028,7 @@ channelClosed:
 			slog.Debug("stream preview: finalized in-place (process exited)")
 		} else {
 			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-				if err := e.sendWithError(p, replyCtx, chunk); err != nil {
+				if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 					return
 				}
 			}
@@ -2865,6 +3120,7 @@ var builtinCommands = []struct {
 	{[]string{"reasoning", "effort"}, "reasoning"},
 	{[]string{"mode"}, "mode"},
 	{[]string{"lang"}, "lang"},
+	{[]string{"quiet"}, "quiet"},
 	{[]string{"provider"}, "provider"},
 	{[]string{"memory"}, "memory"},
 	{[]string{"cron"}, "cron"},
@@ -2884,6 +3140,7 @@ var builtinCommands = []struct {
 	{[]string{"bind"}, "bind"},
 	{[]string{"search", "find"}, "search"},
 	{[]string{"shell", "sh", "exec", "run"}, "shell"},
+	{[]string{"show"}, "show"},
 	{[]string{"dir", "cd", "chdir", "workdir"}, "dir"},
 	{[]string{"tts"}, "tts"},
 	{[]string{"workspace", "ws"}, "workspace"},
@@ -3031,6 +3288,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdMode(p, msg, args)
 	case "lang":
 		e.cmdLang(p, msg, args)
+	case "quiet":
+		e.cmdQuiet(p, msg, args)
 	case "provider":
 		e.cmdProvider(p, msg, args)
 	case "memory":
@@ -3071,6 +3330,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdShell(p, msg, raw)
 	case "diff":
 		e.cmdDiff(p, msg, raw)
+	case "show":
+		e.cmdShow(p, msg, args)
 	case "dir":
 		e.cmdDir(p, msg, args)
 	case "tts":
@@ -3369,6 +3630,23 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	}
 }
 
+// filterOwnedSessions removes agent sessions that are not tracked by cc-connect's
+// session manager. This prevents external CLI sessions in the same work_dir from
+// appearing in /list, /switch, /delete, etc. If the session manager has no tracked
+// agent sessions at all (e.g. first run), all sessions are returned unfiltered.
+func filterOwnedSessions(sessions []AgentSessionInfo, known map[string]struct{}) []AgentSessionInfo {
+	if len(known) == 0 {
+		return sessions
+	}
+	filtered := make([]AgentSessionInfo, 0, len(sessions))
+	for _, s := range sessions {
+		if _, ok := known[s.ID]; ok {
+			filtered = append(filtered, s)
+		}
+	}
+	return filtered
+}
+
 const listPageSize = 20
 
 // dirCardPageSize is the max directory history rows per card page (Feishu / other card UIs).
@@ -3387,6 +3665,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), err))
 			return
 		}
+		agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
 		if len(agentSessions) == 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgListEmpty))
 			return
@@ -3483,6 +3762,7 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
+	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
 
 	matched := e.matchSession(agentSessions, sessions, query)
 	if matched == nil {
@@ -3562,6 +3842,67 @@ func (e *Engine) matchSession(sessions []AgentSessionInfo, manager *SessionManag
 	return nil
 }
 
+func (e *Engine) commandWorkDir(agent Agent, msg *Message) string {
+	if switcher, ok := agent.(WorkDirSwitcher); ok {
+		if wd := strings.TrimSpace(switcher.GetWorkDir()); wd != "" {
+			return normalizeWorkspacePath(wd)
+		}
+	}
+	if e.multiWorkspace {
+		channelKey := effectiveWorkspaceChannelKey(msg)
+		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
+			return normalizeWorkspacePath(b.Workspace)
+		}
+	}
+	if wd, ok := agent.(interface{ GetWorkDir() string }); ok {
+		if dir := strings.TrimSpace(wd.GetWorkDir()); dir != "" {
+			return normalizeWorkspacePath(dir)
+		}
+	}
+	if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
+		if dir := strings.TrimSpace(wd.GetWorkDir()); dir != "" {
+			return normalizeWorkspacePath(dir)
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return normalizeWorkspacePath(cwd)
+	}
+	return ""
+}
+
+func (e *Engine) cmdShow(p Platform, msg *Message, args []string) {
+	rawRef := strings.TrimSpace(strings.Join(args, " "))
+	if rawRef == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgShowUsage))
+		return
+	}
+
+	agent, _, _, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	workDir := e.commandWorkDir(agent, msg)
+	req, err := buildReferenceViewRequest(rawRef, workDir)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgShowParseError, rawRef))
+		return
+	}
+	content, err := renderReferenceView(req)
+	if err != nil {
+		switch {
+		case strings.Contains(err.Error(), "path does not exist"):
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgShowNotFound, rawRef))
+		case strings.Contains(err.Error(), "directory reference cannot carry a location"):
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgShowDirWithLocation, rawRef))
+		default:
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgShowReadFailed, err))
+		}
+		return
+	}
+	e.reply(p, msg.ReplyCtx, content)
+}
+
 func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	// Strip the command prefix ("/shell ", "/sh ", "/exec ", "/run ")
 	shellCmd := raw
@@ -3578,19 +3919,12 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 		return
 	}
 
-	// In multi-workspace mode, resolve workspace directory for this channel
-	var workDir string
-	if e.multiWorkspace {
-		channelKey := effectiveWorkspaceChannelKey(msg)
-		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
-			workDir = normalizeWorkspacePath(b.Workspace)
-		}
+	agent, _, _, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
 	}
-	if workDir == "" {
-		if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
-			workDir = wd.GetWorkDir()
-		}
-	}
+	workDir := e.commandWorkDir(agent, msg)
 	if workDir == "" {
 		workDir, _ = os.Getwd()
 	}
@@ -3628,6 +3962,11 @@ func (e *Engine) cmdDiff(p Platform, msg *Message, raw string) {
 	diffTarget := ""
 	if strings.HasPrefix(strings.ToLower(raw), "/diff ") {
 		diffTarget = strings.TrimSpace(raw[6:])
+	}
+
+	if strings.HasPrefix(diffTarget, "-") {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "diff target must not start with '-'"))
+		return
 	}
 
 	// Resolve working directory (same pattern as cmdShell)
@@ -3670,7 +4009,7 @@ func (e *Engine) cmdDiff(p Platform, msg *Message, raw string) {
 
 		gitArgs := []string{"diff"}
 		if diffTarget != "" {
-			gitArgs = append(gitArgs, diffTarget)
+			gitArgs = append(gitArgs, "--", diffTarget)
 		}
 		gitCmd := exec.CommandContext(ctx, "git", gitArgs...)
 		gitCmd.Dir = workDir
@@ -3754,7 +4093,9 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 				baseDir = absDir
 			}
 
-			switcher.SetWorkDir(baseDir)
+			if !e.multiWorkspace {
+				switcher.SetWorkDir(baseDir)
+			}
 			e.cleanupInteractiveState(interactiveKey)
 
 			s := sessions.GetOrCreateActive(sessionKey)
@@ -3763,7 +4104,11 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 			sessions.Save()
 
 			if e.projectState != nil {
-				e.projectState.ClearWorkDirOverride()
+				if e.multiWorkspace {
+					e.projectState.ClearWorkspaceDirOverride(interactiveKey)
+				} else {
+					e.projectState.ClearWorkDirOverride()
+				}
 				e.projectState.Save()
 			}
 			if e.dirHistory != nil {
@@ -3818,7 +4163,9 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 		return e.i18n.Tf(MsgDirInvalidPath, newDir), ""
 	}
 
-	switcher.SetWorkDir(newDir)
+	if !e.multiWorkspace {
+		switcher.SetWorkDir(newDir)
+	}
 	e.cleanupInteractiveState(interactiveKey)
 
 	s := sessions.GetOrCreateActive(sessionKey)
@@ -3830,7 +4177,11 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 		e.dirHistory.Add(e.name, newDir)
 	}
 	if e.projectState != nil {
-		e.projectState.SetWorkDirOverride(newDir)
+		if e.multiWorkspace {
+			e.projectState.SetWorkspaceDirOverride(interactiveKey, newDir)
+		} else {
+			e.projectState.SetWorkDirOverride(newDir)
+		}
 		e.projectState.Save()
 	}
 
@@ -3920,6 +4271,7 @@ func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSearchError), err))
 		return
 	}
+	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
 
 	type searchResult struct {
 		id           string
@@ -4013,6 +4365,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 			return
 		}
+		agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
 		if idx > len(agentSessions) {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoSession), idx))
 			return
@@ -4773,6 +5126,7 @@ func helpCardGroups() []helpCardGroup {
 				{command: "/provider", action: "nav:/provider"},
 				{command: "/memory", action: "cmd:/memory"},
 				{command: "/allow", action: "cmd:/allow"},
+				{command: "/quiet", action: "cmd:/quiet"},
 				{command: "/tts", action: "cmd:/tts"},
 			},
 		},
@@ -4781,6 +5135,7 @@ func helpCardGroups() []helpCardGroup {
 			titleKey: MsgHelpToolsSection,
 			items: []helpCardItem{
 				{command: "/shell", action: "cmd:/shell"},
+				{command: "/show", action: "cmd:/show"},
 				{command: "/cron", action: "nav:/cron"},
 				{command: "/heartbeat", action: "nav:/heartbeat"},
 				{command: "/commands", action: "nav:/commands"},
@@ -5029,15 +5384,12 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
-	defer cancel()
-	models := switcher.AvailableModels(fetchCtx)
-
-	target := targetInput
-	if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(models) {
-		target = models[idx-1].Name
-	} else {
-		target = resolveModelAlias(models, target)
+	target := strings.TrimSpace(targetInput)
+	if modelSwitchNeedsLookup(target) {
+		fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
+		defer cancel()
+		models := switcher.AvailableModels(fetchCtx)
+		target = resolveModelSwitchTarget(target, models)
 	}
 
 	target, err = e.switchModelOnAgent(agent, target, agent == e.agent)
@@ -5065,6 +5417,33 @@ func resolveModelAlias(models []ModelOption, input string) string {
 		}
 	}
 	return input
+}
+
+func resolveModelSwitchTarget(input string, models []ModelOption) string {
+	input = strings.TrimSpace(input)
+	if idx, err := strconv.Atoi(input); err == nil && idx >= 1 && idx <= len(models) {
+		return models[idx-1].Name
+	}
+	if resolved := resolveModelAlias(models, input); resolved != input {
+		return resolved
+	}
+	for _, m := range models {
+		if strings.EqualFold(m.Name, input) {
+			return m.Name
+		}
+	}
+	return input
+}
+
+func modelSwitchNeedsLookup(input string) bool {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return false
+	}
+	if _, err := strconv.Atoi(input); err == nil {
+		return true
+	}
+	return !strings.Contains(input, "/")
 }
 
 func parseModelSwitchArgs(args []string) (string, bool) {
@@ -5122,6 +5501,10 @@ func (e *Engine) switchModelOnAgent(agent Agent, target string, persistConfig bo
 	providers := providerSwitcher.ListProviders()
 	updated, found := SetProviderModel(providers, active.Name, target)
 	if !found {
+		switcher.SetModel(target)
+		return target, nil
+	}
+	if !persistConfig {
 		switcher.SetModel(target)
 		return target, nil
 	}
@@ -5320,6 +5703,28 @@ func (e *Engine) applyLiveModeChange(sessionKey, mode string) bool {
 		return false
 	}
 	return switcher.SetLiveMode(mode)
+}
+
+func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
+	// /quiet toggles both ThinkingMessages and ToolMessages.
+	// Quiet ON = both hidden; Quiet OFF = both shown.
+	isQuiet := e.display.ThinkingMessages || e.display.ToolMessages
+	e.display.ThinkingMessages = !isQuiet
+	e.display.ToolMessages = !isQuiet
+
+	if e.displaySaveFunc != nil {
+		tm := e.display.ThinkingMessages
+		tool := e.display.ToolMessages
+		if err := e.displaySaveFunc(&tm, nil, nil, &tool); err != nil {
+			slog.Error("failed to persist display config after /quiet", "error", err)
+		}
+	}
+
+	if isQuiet {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietOn))
+	} else {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietOff))
+	}
 }
 
 func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
@@ -6162,6 +6567,73 @@ func (e *Engine) waitOutgoing(p Platform) error {
 	return e.outgoingRL.Wait(e.ctx, p.Name())
 }
 
+func (e *Engine) renderOutgoingContentForWorkspace(p Platform, content, workspaceDir string) string {
+	if strings.TrimSpace(content) == "" {
+		return content
+	}
+	return TransformLocalReferences(content, e.references, e.agent.Name(), p.Name(), workspaceDir)
+}
+
+func (e *Engine) sendWithErrorForWorkspace(p Platform, replyCtx any, content, workspaceDir string) error {
+	if err := e.waitOutgoing(p); err != nil {
+		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
+		return err
+	}
+	content = e.renderOutgoingContentForWorkspace(p, content, workspaceDir)
+	return e.sendAlreadyRenderedWithError(p, replyCtx, content)
+}
+
+func (e *Engine) sendForWorkspace(p Platform, replyCtx any, content, workspaceDir string) {
+	_ = e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
+}
+
+func (e *Engine) renderCardForPlatform(p Platform, card *Card) *Card {
+	return e.renderCardForPlatformWorkspace(p, card, "")
+}
+
+func (e *Engine) renderCardForPlatformWorkspace(p Platform, card *Card, workspaceDir string) *Card {
+	if card == nil {
+		return nil
+	}
+	out := &Card{}
+	if card.Header != nil {
+		h := *card.Header
+		out.Header = &h
+	}
+	out.Elements = make([]CardElement, 0, len(card.Elements))
+	for _, elem := range card.Elements {
+		switch v := elem.(type) {
+		case CardMarkdown:
+			content := v.Content
+			if workspaceDir != "" {
+				content = e.renderOutgoingContentForWorkspace(p, v.Content, workspaceDir)
+			}
+			out.Elements = append(out.Elements, CardMarkdown{Content: content})
+		case CardNote:
+			text := v.Text
+			if workspaceDir != "" {
+				text = e.renderOutgoingContentForWorkspace(p, v.Text, workspaceDir)
+			}
+			out.Elements = append(out.Elements, CardNote{Text: text, Tag: v.Tag})
+		case CardListItem:
+			text := v.Text
+			if workspaceDir != "" {
+				text = e.renderOutgoingContentForWorkspace(p, v.Text, workspaceDir)
+			}
+			out.Elements = append(out.Elements, CardListItem{
+				Text:     text,
+				BtnText:  v.BtnText,
+				BtnType:  v.BtnType,
+				BtnValue: v.BtnValue,
+				Extra:    v.Extra,
+			})
+		default:
+			out.Elements = append(out.Elements, elem)
+		}
+	}
+	return out
+}
+
 // sendWithError applies outgoing rate limiting and p.Send. It logs wait
 // cancellation and platform failures, and returns a non-nil error on either.
 func (e *Engine) sendWithError(p Platform, replyCtx any, content string) error {
@@ -6169,6 +6641,10 @@ func (e *Engine) sendWithError(p Platform, replyCtx any, content string) error {
 		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
 		return err
 	}
+	return e.sendAlreadyRenderedWithError(p, replyCtx, content)
+}
+
+func (e *Engine) sendAlreadyRenderedWithError(p Platform, replyCtx any, content string) error {
 	start := time.Now()
 	if err := p.Send(e.ctx, replyCtx, content); err != nil {
 		slog.Error("platform send failed", "platform", p.Name(), "error", err, "content_len", len(content))
@@ -6183,6 +6659,17 @@ func (e *Engine) sendWithError(p Platform, replyCtx any, content string) error {
 // send wraps p.Send with error logging, slow-operation warnings, and outgoing rate limiting.
 func (e *Engine) send(p Platform, replyCtx any, content string) {
 	_ = e.sendWithError(p, replyCtx, content)
+}
+
+// sendRaw sends content without local-reference rendering. This is used for raw
+// tool outputs, where preserving the original text is preferable to applying the
+// agent-facing reference display transform.
+func (e *Engine) sendRaw(p Platform, replyCtx any, content string) {
+	if err := e.waitOutgoing(p); err != nil {
+		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
+		return
+	}
+	_ = e.sendAlreadyRenderedWithError(p, replyCtx, content)
 }
 
 // drainEvents discards any buffered events from the channel.
@@ -6261,12 +6748,13 @@ func (e *Engine) replyWithCard(p Platform, replyCtx any, card *Card) {
 		return
 	}
 	if cs, ok := p.(CardSender); ok {
-		if err := cs.ReplyCard(e.ctx, replyCtx, card); err != nil {
+		rendered := e.renderCardForPlatform(p, card)
+		if err := cs.ReplyCard(e.ctx, replyCtx, rendered); err != nil {
 			slog.Error("card reply failed", "platform", p.Name(), "error", err)
 		}
 		return
 	}
-	e.reply(p, replyCtx, card.RenderText())
+	e.reply(p, replyCtx, e.renderCardForPlatform(p, card).RenderText())
 }
 
 // sendWithCard sends a card as a new message (not a reply).
@@ -6280,12 +6768,13 @@ func (e *Engine) sendWithCard(p Platform, replyCtx any, card *Card) {
 		return
 	}
 	if cs, ok := p.(CardSender); ok {
-		if err := cs.SendCard(e.ctx, replyCtx, card); err != nil {
+		rendered := e.renderCardForPlatform(p, card)
+		if err := cs.SendCard(e.ctx, replyCtx, rendered); err != nil {
 			slog.Error("card send failed", "platform", p.Name(), "error", err)
 		}
 		return
 	}
-	e.send(p, replyCtx, card.RenderText())
+	e.send(p, replyCtx, e.renderCardForPlatform(p, card).RenderText())
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -6401,17 +6890,17 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			return
 		}
 		fetchCtx, cancel := context.WithTimeout(e.ctx, 3*time.Second)
-		defer cancel()
-		models := switcher.AvailableModels(fetchCtx)
 		target, ok := parseModelSwitchArgs(strings.Fields(args))
 		if !ok {
+			cancel()
 			return
 		}
-		if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(models) {
-			target = models[idx-1].Name
-		} else {
-			target = resolveModelAlias(models, target)
+		target = strings.TrimSpace(target)
+		if modelSwitchNeedsLookup(target) {
+			models := switcher.AvailableModels(fetchCtx)
+			target = resolveModelSwitchTarget(target, models)
 		}
+		cancel()
 		if _, err := e.switchModelOnAgent(agent, target, agent == e.agent); err != nil {
 			slog.Error("failed to switch model from card action", "model", target, "error", err)
 			return
@@ -6529,6 +7018,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if err != nil || len(agentSessions) == 0 {
 			return
 		}
+		agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
 		matched := e.matchSession(agentSessions, sessions, args)
 		if matched == nil {
 			return
@@ -6666,6 +7156,7 @@ func (e *Engine) renderDeleteModeCard(sessionKey string) *Card {
 	if err != nil {
 		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", err.Error())
 	}
+	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
 	dm := e.getDeleteModeState(sessionKey)
 	if dm == nil {
 		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", e.i18n.T(MsgDeleteUsage))
@@ -6877,7 +7368,7 @@ func parseDeleteModeSelectedIDs(args []string) map[string]struct{} {
 }
 
 func (e *Engine) submitDeleteModeSelection(sessionKey string, dm *deleteModeState) []string {
-	agent, _ := e.sessionContextForKey(sessionKey)
+	agent, sessions := e.sessionContextForKey(sessionKey)
 	deleter, ok := agent.(SessionDeleter)
 	if !ok {
 		return []string{e.i18n.T(MsgDeleteNotSupported)}
@@ -6886,6 +7377,7 @@ func (e *Engine) submitDeleteModeSelection(sessionKey string, dm *deleteModeStat
 	if err != nil {
 		return []string{e.i18n.Tf(MsgError, err)}
 	}
+	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
 	seen := make(map[string]struct{}, len(agentSessions))
 	lines := make([]string, 0, len(dm.selectedIDs))
 	for i := range agentSessions {
@@ -7071,6 +7563,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 	if err != nil {
 		return nil, fmt.Errorf(e.i18n.T(MsgListError), err)
 	}
+	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
 	if len(agentSessions) == 0 {
 		return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, agent.Name(), 0), "turquoise", e.i18n.T(MsgListEmpty)), nil
 	}
@@ -7778,7 +8271,7 @@ func (e *Engine) cmdCronAddExec(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdCronList(p Platform, msg *Message) {
-	jobs := e.cronScheduler.Store().ListBySessionKey(msg.SessionKey)
+	jobs := e.cronScheduler.Store().ListByProject(e.name)
 	if len(jobs) == 0 {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronEmpty))
 		return
@@ -8890,7 +9383,7 @@ func (e *Engine) cmdAliasDel(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
-	agent, _, _, err := e.commandContext(p, msg)
+	agent, sessions, _, err := e.commandContext(p, msg)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return
@@ -8920,6 +9413,7 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
+	agentSessions = filterOwnedSessions(agentSessions, sessions.KnownAgentSessionIDs())
 
 	prefix := strings.TrimSpace(args[0])
 	if isExplicitDeleteBatchArg(prefix) {
@@ -9355,8 +9849,9 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 				textParts = append(textParts, fmt.Sprintf(e.i18n.T(MsgToolResult), tn, out)+"\n\n")
 			}
 		case EventResult:
-			if event.SessionID != "" {
-				session.SetAgentSessionID(event.SessionID, agent.Name())
+			// Use agentSession.CurrentSessionID() for the same reason as above.
+			if currentID := agentSession.CurrentSessionID(); currentID != "" {
+				session.SetAgentSessionID(currentID, agent.Name())
 				sessions.Save()
 			}
 			resp := event.Content
@@ -9745,11 +10240,11 @@ func (e *Engine) commandContext(p Platform, msg *Message) (Agent, *SessionManage
 	if workspace == "" {
 		return e.agent, e.sessions, msg.SessionKey, nil
 	}
-	wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(workspace)
+	agent, sessions, interactiveKey, _, err := e.workspaceContext(workspace, msg.SessionKey)
 	if err != nil {
 		return nil, nil, "", err
 	}
-	return wsAgent, wsSessions, workspace + ":" + msg.SessionKey, nil
+	return agent, sessions, interactiveKey, nil
 }
 
 // sessionContextForKey resolves the agent and session manager for a sessionKey.
