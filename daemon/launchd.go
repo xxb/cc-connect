@@ -111,7 +111,7 @@ func (*launchdManager) Stop() error {
 
 func (*launchdManager) Restart() error {
 	domain := preferredLaunchdDomain()
-	if loadedDomain, _, _, ok := loadedLaunchdTarget(); ok {
+	if loadedDomain, _, _, ok := loadedLaunchdTarget(); ok && domain != launchdGUIDomain() {
 		domain = loadedDomain
 	}
 	target := launchdTarget(domain)
