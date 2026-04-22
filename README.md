@@ -56,6 +56,16 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 </tr>
 
 <tr>
+<td width="150"><a href="https://aihubmix.com/?aff=mGTx"><img src="assets/sponsors/aihubmix.png" alt="AIHubMix" width="120"></a> <b>AIHubMix</b></td>
+<td>Thanks to AIHubMix for sponsoring this project! AIHubMix offers deep integration with 500+ global models including OpenAI, Claude, Gemini, Qwen, DeepSeek, Kimi. Unlimited concurrency, production-grade stability on Google Cloud. One API Key drives all your Agents with native OpenAI/Anthropic/Gemini format support — zero code changes. Pay-as-you-go pricing aligned with official providers, plus free models like coding-glm-5.1-free. <a href="https://aihubmix.com/?aff=mGTx">Click here to sign up!</a></td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://nekocode.ai/?aff=CC-CONNECT"><img src="assets/sponsors/nekocode.jpg" alt="NekoCode" width="120"></a></td>
+<td>Thanks to NekoCode for sponsoring this project! NekoCode provides reliable, stable, and efficient API relay services for Claude and CodeX with transparent pricing. Exclusive 10% discount for cc-connect users with promo code: CC-CONNECT. High-value, stable AI model access for developers. Register via <a href="https://nekocode.ai/?aff=CC-CONNECT">this link</a>.</td>
+</tr>
+
+<tr>
 <td width="150"><a href="https://www.dmxapi.cn/register?aff=NDln"><img src="assets/sponsors/dmx-en.jpg" alt="DMXAPI" width="120"></a></td>
 <td>Thanks to DMXAPI for sponsoring this project! DMXAPI provides global large model API services to 200+ enterprise users. One API key for all global models. Features include: instant invoicing, unlimited concurrency, starting from $0.15, 24/7 technical support. GPT/Claude/Gemini all at 32% off, domestic models 20-50% off, Claude Code exclusive models at 66% off! Register via <a href="https://www.dmxapi.cn/register?aff=NDln">this link</a>.</td>
 </tr>
@@ -73,6 +83,11 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 <tr>
 <td width="150"><a href="https://code0.ai/register?aff=5cGO"><img src="assets/sponsors/code0.svg" alt="Code0" width="120"></a></td>
 <td>Thanks to Code0 for sponsoring this project! Code0 is an AI model aggregation API relay service for Chinese developers, compatible with OpenAI / Anthropic / Gemini protocols. One key for all mainstream models, stable support for Claude Code, Codex, Gemini CLI, cc-connect and more. Fixed exchange rate: ¥1.5 CNY = $1 USD API credit, transparent pricing, domestic direct connection, ready to use. Register via <a href="https://code0.ai/register?aff=5cGO">this link</a>.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://coder.visioncoder.cn"><img src="assets/sponsors/visioncoder.png" alt="VisionCoder" width="120"></a></td>
+<td>Thanks to VisionCoder for supporting this project. <a href="https://coder.visioncoder.cn">VisionCoder Developer Platform</a> is a reliable and efficient API relay service provider, offering access to mainstream AI models such as Claude Code, Codex, and Gemini. It helps developers and teams integrate AI capabilities more easily and improve productivity. VisionCoder is also offering our users a limited-time <a href="https://coder.visioncoder.cn">Token Plan</a> promotion: buy 1 month and get 1 month free.</td>
 </tr>
 
 <tr>
@@ -151,7 +166,7 @@ High-level view of what each **built-in platform** can do in cc-connect.
 ## ✨ Why cc-connect?
 
 ### 🤖 Universal Agent Support
-**9+ AI Agents** — Claude Code, Codex, Cursor Agent, Kimi CLI, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI, Pi — plus any agent that supports the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents). Use whichever fits your workflow, or all of them at once.
+**10+ AI Agents** — Claude Code, Codex, Cursor Agent, Kimi CLI, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI, Pi, Devin — plus any agent that supports the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents). Use whichever fits your workflow, or all of them at once.
 
 ### 📱 Platform Flexibility
 **11 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, Weibo, LINE, QQ, QQ Bot (Official), plus **Weixin (personal ilink)** for **personal WeChat**. Most platforms need **zero public IP**.
@@ -286,6 +301,7 @@ cc-connect update --pre     # Include pre-releases
 | Agent | Kimi CLI (Moonshot) | ✅ Supported |
 | Agent | Pi (Cursor Background Agent) | ✅ Supported |
 | Agent | ACP (Agent Client Protocol) | ✅ Any [ACP-compatible agent](https://agentclientprotocol.com/get-started/agents) |
+| Agent | Devin (Cognition) | ✅ Supported (via ACP) |
 | Agent | Goose (Block) | 🔜 Planned |
 | Agent | Aider | 🔜 Planned |
 | Platform | Feishu (Lark) | ✅ WebSocket — no public IP needed |
