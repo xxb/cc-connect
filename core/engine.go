@@ -2700,6 +2700,10 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
+	// Create the queue placeholder before TryLock. A concurrent message can
+	// observe this session as busy before the first goroutine reaches the
+	// sessionLocked block; without the placeholder it cannot enter the queue.
+	e.ensureInteractiveStateForQueueing(interactiveKey, p, msg.ReplyCtx)
 	if !session.TryLock() {
 		if e.stopCurrentMessageIfRecalled(interactiveKey) {
 			if e.waitForSessionLock(session, recalledStopLockWait) {
@@ -2736,7 +2740,8 @@ sessionLocked:
 
 	// Ensure an interactiveState entry exists before launching the async
 	// processor so messages arriving during session startup can be queued
-	// instead of dropped (issue #565).
+	// instead of dropped (issue #565). This is still needed after idle auto-
+	// reset because cleanupInteractiveState may remove the early placeholder.
 	e.ensureInteractiveStateForQueueing(interactiveKey, p, msg.ReplyCtx)
 	e.noteUserMessageAccepted(interactiveKey, msg.UserMessageTimeMs)
 	slog.Debug("user message accepted for processing",
