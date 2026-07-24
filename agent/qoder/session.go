@@ -23,6 +23,8 @@ import (
 // Each Send() spawns `qodercli -p <prompt> -f stream-json -q`.
 // Subsequent turns use `-r <sessionID>` to resume the conversation.
 type qoderSession struct {
+	cmd            string
+	extraArgs      []string // extra args from cmd, prepended before qoder args
 	workDir        string
 	model          string
 	mode           string
@@ -47,17 +49,19 @@ const maxAssistantTextCacheEntries = 1024
 // silently skipped under root).
 func (qs *qoderSession) StartupWarning() string { return qs.startupWarning }
 
-func newQoderSession(ctx context.Context, workDir, model, mode, resumeID string, extraEnv []string) (*qoderSession, error) {
+func newQoderSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, resumeID string, extraEnv []string) (*qoderSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	qs := &qoderSession{
-		workDir:  workDir,
-		model:    model,
-		mode:     mode,
-		extraEnv: extraEnv,
-		events:   make(chan core.Event, 64),
-		ctx:      sessionCtx,
-		cancel:   cancel,
+		cmd:       cmd,
+		extraArgs: extraArgs,
+		workDir:   workDir,
+		model:     model,
+		mode:      mode,
+		extraEnv:  extraEnv,
+		events:    make(chan core.Event, 64),
+		ctx:       sessionCtx,
+		cancel:    cancel,
 
 		assistantTextByID: make(map[string]string),
 	}
@@ -76,19 +80,19 @@ func newQoderSession(ctx context.Context, workDir, model, mode, resumeID string,
 	return qs, nil
 }
 
-func (qs *qoderSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (qs *qoderSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if len(images) > 0 {
 		slog.Warn("qoderSession: images not supported, ignoring")
 	}
 	if len(files) > 0 {
-		filePaths := core.SaveFilesToDisk(qs.workDir, files)
+		filePaths := core.SaveFilesToDisk(qs.workDir, messageID, files)
 		prompt = core.AppendFileRefs(prompt, filePaths)
 	}
 	if !qs.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
 
-	args := []string{"-p", prompt, "-f", "stream-json", "-q", "-w", qs.workDir}
+	args := append(append([]string{}, qs.extraArgs...), "-p", prompt, "-f", "stream-json", "-q", "-w", qs.workDir)
 
 	sid := qs.CurrentSessionID()
 	if sid != "" {
@@ -109,7 +113,7 @@ func (qs *qoderSession) Send(prompt string, images []core.ImageAttachment, files
 
 	slog.Debug("qoderSession: launching", "resume", sid != "", "args_len", len(args))
 
-	cmd := exec.CommandContext(qs.ctx, "qodercli", args...)
+	cmd := exec.CommandContext(qs.ctx, qs.cmd, args...)
 	cmd.Dir = qs.workDir
 	if len(qs.extraEnv) > 0 {
 		cmd.Env = core.MergeEnv(os.Environ(), qs.extraEnv)

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -262,12 +263,12 @@ func TestAgent_Name(t *testing.T) {
 }
 
 func TestAgent_CLIBinaryName(t *testing.T) {
-	a := &Agent{cliBin: "claude"}
+	a := &Agent{cmd: "claude"}
 	if got := a.CLIBinaryName(); got != "claude" {
 		t.Errorf("CLIBinaryName() = %q, want %q", got, "claude")
 	}
 
-	a2 := &Agent{cliBin: "my-cli"}
+	a2 := &Agent{cmd: "my-cli"}
 	if got := a2.CLIBinaryName(); got != "my-cli" {
 		t.Errorf("CLIBinaryName() = %q, want %q", got, "my-cli")
 	}
@@ -518,7 +519,7 @@ func TestFindProjectDir_ICloudPath(t *testing.T) {
 func TestSnapshotCLIPath(t *testing.T) {
 	cases := []struct {
 		name      string
-		cliBin    string
+		cmd       string
 		extraArgs []string
 		want      string
 	}{
@@ -530,9 +531,9 @@ func TestSnapshotCLIPath(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := snapshotCLIPath(tc.cliBin, tc.extraArgs)
+			got := snapshotCmdPath(tc.cmd, tc.extraArgs)
 			if got != tc.want {
-				t.Errorf("snapshotCLIPath(%q, %v) = %q, want %q", tc.cliBin, tc.extraArgs, got, tc.want)
+				t.Errorf("snapshotCmdPath(%q, %v) = %q, want %q", tc.cmd, tc.extraArgs, got, tc.want)
 			}
 		})
 	}
@@ -543,9 +544,9 @@ func TestWorkspaceAgentOptions_FullSnapshot(t *testing.T) {
 	// PATH. WorkspaceAgentOptions only reads fields that the production
 	// New() also writes; this just verifies the snapshot shape.
 	a := &Agent{
-		cliBin:           "my-cli",
+		cmd:           "my-cli",
 		cliExtraArgs:     []string{"--add-dir", "/parent"},
-		cliArgsFlag:      "-a",
+		cmdArgsFlag:      "-a",
 		model:            "claude-opus-4-7",
 		reasoningEffort:  "high",
 		mode:             "acceptEdits",
@@ -559,8 +560,8 @@ func TestWorkspaceAgentOptions_FullSnapshot(t *testing.T) {
 
 	want := map[string]any{
 		"mode":               "acceptEdits",
-		"cli_path":           "my-cli --add-dir /parent",
-		"cli_args_flag":      "-a",
+		"cmd":           "my-cli --add-dir /parent",
+		"cmd_args_flag":      "-a",
 		"model":              "claude-opus-4-7",
 		"reasoning_effort":   "high",
 		"allowed_tools":      []any{"Edit", "Read"},
@@ -585,9 +586,9 @@ func TestWorkspaceAgentOptions_FullSnapshot(t *testing.T) {
 }
 
 func TestWorkspaceAgentOptions_OmitsZeroValues(t *testing.T) {
-	// Default agent (only mode is always emitted, plus default cliBin
-	// "claude" should be skipped by snapshotCLIPath).
-	a := &Agent{cliBin: "claude", mode: "default"}
+	// Default agent (only mode is always emitted, plus default cmd
+	// "claude" should be skipped by snapshotCmdPath).
+	a := &Agent{cmd: "claude", mode: "default"}
 	got := a.WorkspaceAgentOptions()
 
 	if len(got) != 1 {
@@ -597,7 +598,7 @@ func TestWorkspaceAgentOptions_OmitsZeroValues(t *testing.T) {
 		t.Errorf("snapshot[mode] = %v, want %q", got["mode"], "default")
 	}
 	for _, k := range []string{
-		"cli_path", "cli_args_flag", "model", "reasoning_effort",
+		"cmd", "cmd_args_flag", "model", "reasoning_effort",
 		"allowed_tools", "disallowed_tools", "max_context_tokens",
 		"router_url", "router_api_key",
 	} {
@@ -621,9 +622,9 @@ func TestWorkspaceAgentOptions_RoundTripsThroughNew(t *testing.T) {
 		t.Skip("run_as_user-based LookPath bypass is Unix-only")
 	}
 	parent := &Agent{
-		cliBin:           "my-cli",
+		cmd:           "my-cli",
 		cliExtraArgs:     []string{"code", "--add-dir", "/parent"},
-		cliArgsFlag:      "-a",
+		cmdArgsFlag:      "-a",
 		model:            "claude-opus-4-7",
 		reasoningEffort:  "high",
 		mode:             "acceptEdits",
@@ -643,14 +644,14 @@ func TestWorkspaceAgentOptions_RoundTripsThroughNew(t *testing.T) {
 	}
 	child := a.(*Agent)
 
-	if child.cliBin != "my-cli" {
-		t.Errorf("cliBin = %q, want %q", child.cliBin, "my-cli")
+	if child.cmd != "my-cli" {
+		t.Errorf("cmd = %q, want %q", child.cmd, "my-cli")
 	}
 	if !reflect.DeepEqual(child.cliExtraArgs, []string{"code", "--add-dir", "/parent"}) {
 		t.Errorf("cliExtraArgs = %v, want [code --add-dir /parent]", child.cliExtraArgs)
 	}
-	if child.cliArgsFlag != "-a" {
-		t.Errorf("cliArgsFlag = %q, want -a", child.cliArgsFlag)
+	if child.cmdArgsFlag != "-a" {
+		t.Errorf("cmdArgsFlag = %q, want -a", child.cmdArgsFlag)
 	}
 	if child.model != "claude-opus-4-7" {
 		t.Errorf("model = %q, want claude-opus-4-7", child.model)
@@ -708,9 +709,52 @@ func TestScanSessionMeta_ArrayContent(t *testing.T) {
 		t.Errorf("scanSessionMeta count = %d, want 4 (2 user + 2 assistant, array content should not be skipped)", count)
 	}
 
-	// Summary should come from the last user message with string content (line 2)
+	// Summary should come from the first user message with string content (line 2)
 	if summary != "Hello world" {
 		t.Errorf("scanSessionMeta summary = %q, want %q", summary, "Hello world")
+	}
+}
+
+func TestScanSessionMeta_AITitleAndCustomTitle(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "test.jsonl")
+
+	lines := []string{
+		`{"type": "user", "message": {"content": "[cc-connect sender_id=abc] first prompt"}}`,
+		`{"type": "assistant", "message": {"content": "reply"}}`,
+		`{"type": "ai-title", "sessionId": "sess-1", "aiTitle": "查看cc-connect开机自启功能"}`,
+	}
+	data := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write test jsonl: %v", err)
+	}
+
+	summary, count := scanSessionMeta(path)
+	if count != 2 {
+		t.Errorf("scanSessionMeta count = %d, want 2", count)
+	}
+	if summary != "查看cc-connect开机自启功能" {
+		t.Errorf("scanSessionMeta summary = %q, want ai-title", summary)
+	}
+}
+
+func TestScanSessionMeta_CustomTitleOverridesAITitle(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "test.jsonl")
+
+	lines := []string{
+		`{"type": "user", "message": {"content": "ignored fallback"}}`,
+		`{"type": "ai-title", "sessionId": "sess-1", "aiTitle": "AI generated title"}`,
+		`{"type": "custom-title", "sessionId": "sess-1", "customTitle": "User renamed title"}`,
+	}
+	data := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write test jsonl: %v", err)
+	}
+
+	summary, _ := scanSessionMeta(path)
+	if summary != "User renamed title" {
+		t.Errorf("scanSessionMeta summary = %q, want custom-title", summary)
 	}
 }
 

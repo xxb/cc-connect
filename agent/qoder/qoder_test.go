@@ -61,7 +61,7 @@ func TestQoderSession(t *testing.T) {
 	}
 	defer sess.Close()
 
-	if err := sess.Send("say hello in one word", nil, nil); err != nil {
+	if err := sess.Send("say hello in one word", "", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -133,7 +133,7 @@ func TestAgent_Name(t *testing.T) {
 }
 
 func TestAgent_CLIBinaryName(t *testing.T) {
-	a := &Agent{}
+	a := &Agent{cmd: "qodercli"}
 	if got := a.CLIBinaryName(); got != "qodercli" {
 		t.Errorf("CLIBinaryName() = %q, want %q", got, "qodercli")
 	}

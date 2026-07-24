@@ -23,6 +23,7 @@ import (
 // antigravitySession manages multi-turn conversations with the Antigravity CLI (agy).
 type antigravitySession struct {
 	cmd              string
+	extraArgs        []string // extra args from cmd, prepended before agy args
 	workDir          string
 	model            string
 	mode             string
@@ -38,19 +39,20 @@ type antigravitySession struct {
 	permissionBridge *agyPermissionBridge
 }
 
-func newAntigravitySession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string, timeout time.Duration) (*antigravitySession, error) {
+func newAntigravitySession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, resumeID string, extraEnv []string, timeout time.Duration) (*antigravitySession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	as := &antigravitySession{
-		cmd:      cmd,
-		workDir:  workDir,
-		model:    model,
-		mode:     mode,
-		timeout:  timeout,
-		extraEnv: extraEnv,
-		events:   make(chan core.Event, 64),
-		ctx:      sessionCtx,
-		cancel:   cancel,
+		cmd:       cmd,
+		extraArgs: extraArgs,
+		workDir:   workDir,
+		model:     model,
+		mode:      mode,
+		timeout:   timeout,
+		extraEnv:  extraEnv,
+		events:    make(chan core.Event, 64),
+		ctx:       sessionCtx,
+		cancel:    cancel,
 	}
 	as.alive.Store(true)
 
@@ -70,7 +72,7 @@ func newAntigravitySession(ctx context.Context, cmd, workDir, model, mode, resum
 	return as, nil
 }
 
-func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (as *antigravitySession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if !as.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
@@ -147,7 +149,7 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 	if as.permissionBridge != nil {
 		agyConfigDir = as.permissionBridge.AgyConfigDir()
 	}
-	args := buildAntigravityArgs(chatID, isResume, as.mode, agyConfigDir, fullPrompt)
+	args := as.buildAntigravityArgs(chatID, isResume, as.mode, agyConfigDir, fullPrompt)
 	if strings.TrimSpace(as.model) != "" {
 		slog.Warn("antigravitySession: model is configured but ignored because agy does not support --model yet", "model", as.model)
 	}
@@ -204,9 +206,10 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 	return nil
 }
 
-func buildAntigravityArgs(chatID string, isResume bool, mode, agyConfigDir, fullPrompt string) []string {
+func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool, mode, agyConfigDir, fullPrompt string) []string {
+	// Prepend extra args from cmd so wrappers like "timeout 3600 agy" work.
 	// Keep "-p <prompt>" at the very end because agy consumes the immediate next arg.
-	args := make([]string, 0, 10)
+	args := append([]string{}, as.extraArgs...)
 	if agyConfigDir != "" {
 		// Antigravity currently names this compatibility flag --gemini_dir.
 		args = append(args, "--gemini_dir="+agyConfigDir, "--print-timeout=24h")

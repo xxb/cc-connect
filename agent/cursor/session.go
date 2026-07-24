@@ -22,24 +22,25 @@ import (
 // cursorSession manages multi-turn conversations with the Cursor Agent CLI.
 // Each Send() launches a new `agent --print` process with --resume for continuity.
 type cursorSession struct {
-	cmd      string // CLI binary name
-	workDir  string
-	model    string
-	mode     string
-	extraEnv []string
-	events   chan core.Event
-	chatID   atomic.Value // stores string — Cursor chat/session ID
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	alive    atomic.Bool
+	cmd       string   // CLI binary name
+	extraArgs []string // extra args from cmd, prepended before agent args
+	workDir   string
+	model     string
+	mode      string
+	extraEnv  []string
+	events    chan core.Event
+	chatID    atomic.Value // stores string — Cursor chat/session ID
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	alive     atomic.Bool
 
 	thinkingBuf strings.Builder // accumulate thinking deltas
 
 	// Permission handling: each Send() creates a new process whose stdin is used
 	// to respond to interaction_query permission requests.
-	stdinMu  sync.Mutex
-	stdin    io.WriteCloser // current process stdin; nil when no process is running
+	stdinMu sync.Mutex
+	stdin   io.WriteCloser // current process stdin; nil when no process is running
 
 	pendingMu sync.Mutex
 	pending   *pendingInteractionQuery // most recent unresolved interaction_query/request
@@ -51,18 +52,19 @@ type pendingInteractionQuery struct {
 	queryType string // e.g. "webFetchRequestQuery", "shellRequestQuery"
 }
 
-func newCursorSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string) (*cursorSession, error) {
+func newCursorSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, resumeID string, extraEnv []string) (*cursorSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	cs := &cursorSession{
-		cmd:      cmd,
-		workDir:  workDir,
-		model:    model,
-		mode:     mode,
-		extraEnv: extraEnv,
-		events:   make(chan core.Event, 64),
-		ctx:      sessionCtx,
-		cancel:   cancel,
+		cmd:       cmd,
+		extraArgs: extraArgs,
+		workDir:   workDir,
+		model:     model,
+		mode:      mode,
+		extraEnv:  extraEnv,
+		events:    make(chan core.Event, 64),
+		ctx:       sessionCtx,
+		cancel:    cancel,
 	}
 	cs.alive.Store(true)
 
@@ -73,12 +75,12 @@ func newCursorSession(ctx context.Context, cmd, workDir, model, mode, resumeID s
 	return cs, nil
 }
 
-func (cs *cursorSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (cs *cursorSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if len(images) > 0 {
 		slog.Warn("cursorSession: images not yet supported in CLI mode, ignoring")
 	}
 	if len(files) > 0 {
-		filePaths := core.SaveFilesToDisk(cs.workDir, files)
+		filePaths := core.SaveFilesToDisk(cs.workDir, messageID, files)
 		prompt = core.AppendFileRefs(prompt, filePaths)
 	}
 	if !cs.alive.Load() {
@@ -88,10 +90,10 @@ func (cs *cursorSession) Send(prompt string, images []core.ImageAttachment, file
 	chatID := cs.CurrentSessionID()
 	isResume := chatID != ""
 
-	args := []string{
+	args := append(append([]string{}, cs.extraArgs...),
 		"--print",
 		"--output-format", "stream-json",
-	}
+	)
 
 	switch cs.mode {
 	case "force":
