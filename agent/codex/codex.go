@@ -15,6 +15,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/chenhg5/cc-connect/agent/internal/skillroots"
 	"github.com/chenhg5/cc-connect/core"
 )
 
@@ -120,7 +121,11 @@ func normalizeBackend(raw string) string {
 func normalizeAppServerURL(raw string) string {
 	url := strings.TrimSpace(raw)
 	if url == "" {
-		return "ws://127.0.0.1:3845"
+		// Default to the stdio transport: cc-connect's app_server backend
+		// speaks JSON-RPC over the stdio pipes, and on codex 0.152+ a ws://
+		// --listen value leaves stdio unresponsive (see #1781). Users who
+		// need a WebSocket listener can still set app_server_url explicitly.
+		return "stdio://"
 	}
 	if strings.EqualFold(url, "stdio") {
 		return "stdio://"
@@ -145,14 +150,22 @@ func normalizeReasoningEffort(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "":
 		return ""
+	case "none", "off", "disabled", "disable":
+		return "none"
+	case "minimal", "min":
+		return "minimal"
 	case "low":
 		return "low"
 	case "medium", "med":
 		return "medium"
 	case "high":
 		return "high"
-	case "xhigh", "x-high", "very-high":
+	case "xhigh", "x-high", "extra-high", "extra_high", "very-high":
 		return "xhigh"
+	case "max", "maximum":
+		return "max"
+	case "ultra":
+		return "ultra"
 	default:
 		return ""
 	}
@@ -200,7 +213,7 @@ func (a *Agent) GetReasoningEffort() string {
 }
 
 func (a *Agent) AvailableReasoningEfforts() []string {
-	return []string{"low", "medium", "high", "xhigh"}
+	return []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {
@@ -222,7 +235,19 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := readCodexCachedModels(); len(models) > 0 {
 		return models
 	}
+	return defaultCodexModels()
+}
+
+func defaultCodexModels() []core.ModelOption {
 	return []core.ModelOption{
+		{Name: "gpt-5.6-sol", Desc: "GPT-5.6 Sol (strongest for complex Codex work)"},
+		{Name: "gpt-5.6-terra", Desc: "GPT-5.6 Terra (balanced everyday Codex work)"},
+		{Name: "gpt-5.6-luna", Desc: "GPT-5.6 Luna (fast, efficient GPT-5.6 model)"},
+		{Name: "gpt-5.6", Desc: "GPT-5.6 (recommended Codex model family default)"},
+		{Name: "gpt-5.5", Desc: "GPT-5.5 (previous frontier Codex model)"},
+		{Name: "gpt-5.4", Desc: "GPT-5.4 (frontier Codex model)"},
+		{Name: "gpt-5.4-mini", Desc: "GPT-5.4 Mini (fast Codex model)"},
+		{Name: "gpt-5.3-codex-spark", Desc: "GPT-5.3 Codex Spark (fast text-only iteration)"},
 		{Name: "o4-mini", Desc: "O4 Mini (fast reasoning)"},
 		{Name: "o3", Desc: "O3 (most capable reasoning)"},
 		{Name: "gpt-4.1", Desc: "GPT-4.1 (balanced)"},
@@ -353,7 +378,6 @@ func readCodexCachedModels() []core.ModelOption {
 	return parseCodexModelsJSON(b)
 }
 
-
 // parseCodexModelsJSON parses a Codex models JSON file (model_catalog.json
 // or models_cache.json) into a deduplicated, filtered slice of ModelOption.
 // It is shared by readCodexCachedModels and readCodexModelCatalog.
@@ -398,7 +422,6 @@ func parseCodexModelsJSON(data []byte) []core.ModelOption {
 	}
 	return models
 }
-
 
 // readCodexModelCatalog reads $CODEX_HOME/config.toml to find the
 // model_catalog_json setting, then reads and parses that JSON file.
@@ -607,12 +630,18 @@ func codexSkillDirs(workDir, explicitCodexHome string) []string {
 	}
 
 	projectDirs := walkUpCodexProjectSkillDirs(workDir, homeDir)
-	userDirs := make([]string, 0, 2)
+	userDirs := make([]string, 0, 4)
 	if codexHome != "" {
-		userDirs = append(userDirs, filepath.Join(codexHome, "skills"))
+		userDirs = append(userDirs,
+			filepath.Join(codexHome, "skills"),
+			filepath.Join(codexHome, "skills", ".system"),
+		)
+		userDirs = append(userDirs, skillroots.Find(filepath.Join(codexHome, "plugins"))...)
 	}
 	if homeDir != "" {
-		userDirs = append(userDirs, filepath.Join(homeDir, ".agents", "skills"))
+		userDirs = append(userDirs,
+			filepath.Join(homeDir, ".agents", "skills"),
+		)
 	}
 	return uniqueCodexSkillDirs(append(projectDirs, userDirs...))
 }
