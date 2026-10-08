@@ -326,6 +326,54 @@ func TestRelayManager_DefaultVisibilityEchoesFullMessages(t *testing.T) {
 	}
 }
 
+func TestRelayManager_FullVisibilityPreservesLongResponses(t *testing.T) {
+	for _, visibility := range []string{"", RelayVisibilityFull} {
+		for _, late := range []bool{false, true} {
+			t.Run(fmt.Sprintf("visibility=%s/late=%t", visibility, late), func(t *testing.T) {
+				p := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+				s := newControllableSession("long-response-session")
+				e := NewEngine("target", &controllableAgent{nextSession: s}, []Platform{p}, "", LangEnglish)
+				rm := NewRelayManager("")
+				rm.SetVisibility(visibility)
+				rm.RegisterEngine("target", e)
+				rm.Bind("test", "chat-1", map[string]string{"source": "source-bot", "target": "target-bot"})
+				response := strings.Repeat("完整回复", 700) + "\nFINAL_RESPONSE_END"
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if late {
+					cancel()
+					s.events <- Event{Type: EventToolResult, ToolName: "run_command", ToolResult: "tool output"}
+				} else {
+					s.events <- Event{Type: EventResult, Content: response, Done: true}
+				}
+				resp, err := rm.Send(ctx, RelayRequest{From: "source", To: "target", SessionKey: "test:chat-1:user", Message: "review"})
+				if err != nil {
+					t.Fatalf("Send error = %v", err)
+				}
+				wantCount := 1
+				if late {
+					wantCount = 2
+					s.events <- Event{Type: EventResult, Content: response, Done: true}
+					select {
+					case <-s.closed:
+					case <-time.After(2 * time.Second):
+						t.Fatal("late relay did not finish")
+					}
+				} else if resp.Response != response {
+					t.Fatal("relay return value lost response content")
+				}
+				sent := p.getSent()
+				if len(sent) != wantCount {
+					t.Fatalf("sent %d messages, want %d", len(sent), wantCount)
+				}
+				if sent[wantCount-1] != "[target-bot] "+response {
+					t.Fatalf("full response was truncated: got %d runes, want %d", len([]rune(sent[wantCount-1])), len([]rune("[target-bot] "+response)))
+				}
+			})
+		}
+	}
+}
+
 func TestRelayManager_VisibilitySummarySuppressesBodies(t *testing.T) {
 	resp, sourceSent, targetSent := runRelayVisibilityScenario(t, RelayVisibilitySummary)
 
