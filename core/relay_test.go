@@ -354,6 +354,86 @@ func TestRelayManager_VisibilityNoneSuppressesGroupEcho(t *testing.T) {
 	}
 }
 
+func TestRelayManager_CanceledCallerDeliversLateFinalResponse(t *testing.T) {
+	for _, visibility := range []string{RelayVisibilityFull, RelayVisibilitySummary, RelayVisibilityNone} {
+		for _, finalContent := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/result_content=%t", visibility, finalContent), func(t *testing.T) {
+				p := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+				s := newControllableSession("late-session")
+				e := NewEngine("target", &controllableAgent{nextSession: s}, []Platform{p}, "", LangEnglish)
+				rm := NewRelayManager("")
+				rm.SetVisibility(visibility)
+				rm.RegisterEngine("target", e)
+				rm.Bind("test", "chat-1", map[string]string{"source": "source-bot", "target": "target-bot"})
+
+				// The caller disconnects after dispatch; the target agent keeps running.
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				s.events <- Event{Type: EventToolResult, ToolName: "run_command", ToolResult: "tool output"}
+				resp, err := rm.Send(ctx, RelayRequest{From: "source", To: "target", SessionKey: "test:chat-1:user", Message: "review"})
+				if err != nil || !strings.Contains(resp.Response, "tool output") {
+					t.Fatalf("partial response = %+v, error = %v", resp, err)
+				}
+				result := Event{Type: EventResult, Done: true}
+				if finalContent {
+					result.Content = "final answer"
+				} else {
+					s.events <- Event{Type: EventText, Content: "final "}
+					s.events <- Event{Type: EventText, Content: "answer"}
+				}
+				s.events <- result
+				select {
+				case <-s.closed:
+				case <-time.After(2 * time.Second):
+					t.Fatal("late relay did not finish")
+				}
+
+				sent := p.getSent()
+				if visibility == RelayVisibilityNone {
+					if len(sent) != 0 {
+						t.Fatalf("hidden relay sent messages: %#v", sent)
+					}
+					return
+				}
+				if len(sent) != 2 {
+					t.Fatalf("sent = %#v, want partial and late final response", sent)
+				}
+				want := relayVisibilityResponseLabel(visibility, "target-bot", "final answer")
+				if sent[1] != want {
+					t.Fatalf("late response = %q, want %q", sent[1], want)
+				}
+			})
+		}
+	}
+}
+
+func TestRelayManager_TimedOutCallerDeliversLateError(t *testing.T) {
+	p := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	s := newControllableSession("late-session")
+	e := NewEngine("target", &controllableAgent{nextSession: s}, []Platform{p}, "", LangEnglish)
+	rm := NewRelayManager("")
+	rm.RegisterEngine("target", e)
+	rm.Bind("test", "chat-1", map[string]string{"source": "source-bot", "target": "target-bot"})
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	s.events <- Event{Type: EventThinking, Content: "working"}
+	_, err := rm.Send(ctx, RelayRequest{From: "source", To: "target", SessionKey: "test:chat-1:user", Message: "review"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Send error = %v, want deadline exceeded", err)
+	}
+	s.events <- Event{Type: EventError, Error: errors.New("agent failed")}
+	select {
+	case <-s.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("late relay did not finish")
+	}
+	sent := p.getSent()
+	want := relayVisibilityResponseLabel(RelayVisibilityFull, "target-bot", e.i18n.Tf(MsgError, errors.New("agent failed")))
+	if len(sent) != 1 || sent[0] != want {
+		t.Fatalf("sent = %#v, want late error %q", sent, want)
+	}
+}
+
 func TestHandleRelay_ReturnsPartialOnTimeout(t *testing.T) {
 	e := newTestEngine()
 	session := newControllableSession("relay-session")

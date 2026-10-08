@@ -254,7 +254,23 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 	relayCtx, cancel := rm.relayContext(ctx)
 	defer cancel()
 
-	response, err := targetEngine.HandleRelay(relayCtx, req.From, req.SessionKey, req.Message)
+	initialDeliveryDone := make(chan struct{})
+	defer close(initialDeliveryDone)
+	onLateResult := func(response string, err error) {
+		// Keep the late answer after any partial response already being sent.
+		<-initialDeliveryDone
+		if visibility == RelayVisibilityNone {
+			return
+		}
+		if err != nil {
+			response = targetEngine.i18n.Tf(MsgError, err)
+		}
+		label := relayVisibilityResponseLabel(visibility, toName, response)
+		// The original HTTP caller may have disconnected; delivery belongs
+		// to the still-running target engine, not the canceled request.
+		rm.sendToGroup(targetEngine.ctx, targetEngine, platform, groupSessionKey, label)
+	}
+	response, err := targetEngine.handleRelay(relayCtx, req.From, req.SessionKey, req.Message, onLateResult)
 	if err != nil {
 		return nil, fmt.Errorf("relay: %w", err)
 	}
