@@ -275,9 +275,13 @@ func (b *agyPermissionBridge) handleConnection(conn net.Conn) {
 
 	select {
 	case result := <-resultCh:
-		response := antigravityhook.BridgeResponse{Decision: "allow"}
+		response := antigravityhook.BridgeResponse{
+			Decision:            "allow",
+			PermissionOverrides: permissionOverridesFor(input),
+		}
 		if strings.EqualFold(strings.TrimSpace(result.Behavior), "deny") {
 			response.Decision = "deny"
+			response.PermissionOverrides = nil
 			response.Reason = strings.TrimSpace(result.Message)
 			if response.Reason == "" {
 				response.Reason = "User denied this tool use."
@@ -298,6 +302,39 @@ func formatAgyToolInput(input map[string]any) string {
 		return fmt.Sprintf("%v", input)
 	}
 	return string(data)
+}
+
+func permissionOverridesFor(input agyHookInput) []string {
+	if input.ToolCall.Name != "run_command" {
+		return nil
+	}
+	command, _ := input.ToolCall.Args["CommandLine"].(string)
+	command = normalizeCommandPermissionTarget(command)
+	if command == "" {
+		return nil
+	}
+	return []string{"command(" + command + ")"}
+}
+
+func normalizeCommandPermissionTarget(command string) string {
+	command = strings.TrimSpace(command)
+	if len(command) < 2 || (command[0] != '"' && command[0] != '\'') || command[len(command)-1] != command[0] {
+		return command
+	}
+
+	quote := command[0]
+	escaped := false
+	for i := 1; i < len(command)-1; i++ {
+		if quote == '"' && command[i] == '\\' && !escaped {
+			escaped = true
+			continue
+		}
+		if command[i] == quote && !escaped {
+			return command
+		}
+		escaped = false
+	}
+	return strings.TrimSpace(command[1 : len(command)-1])
 }
 
 func (b *agyPermissionBridge) writeResponse(conn net.Conn, response antigravityhook.BridgeResponse) {

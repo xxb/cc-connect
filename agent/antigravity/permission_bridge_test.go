@@ -72,11 +72,11 @@ func TestAgyPermissionBridgePreservesHooksAndRelaysDecisions(t *testing.T) {
 		t.Fatal("overlay does not contain cc-connect permission hook")
 	}
 
-	testBridgeDecision(t, bridge, events, "allow", "", "allow", "")
-	testBridgeDecision(t, bridge, events, "deny", "not now", "deny", "not now")
+	testBridgeDecision(t, bridge, events, "allow", "", "allow", "", []string{"command(touch /tmp/permission-test)"})
+	testBridgeDecision(t, bridge, events, "deny", "not now", "deny", "not now", nil)
 }
 
-func testBridgeDecision(t *testing.T, bridge *agyPermissionBridge, events <-chan core.Event, behavior, message, wantDecision, wantReason string) {
+func testBridgeDecision(t *testing.T, bridge *agyPermissionBridge, events <-chan core.Event, behavior, message, wantDecision, wantReason string, wantOverrides []string) {
 	t.Helper()
 
 	hookInput := `{
@@ -84,7 +84,7 @@ func testBridgeDecision(t *testing.T, bridge *agyPermissionBridge, events <-chan
   "stepIdx": 3,
   "toolCall": {
     "name": "run_command",
-    "args": {"CommandLine": "touch /tmp/permission-test", "Cwd": "/tmp"}
+    "args": {"CommandLine": "\"touch /tmp/permission-test\"", "Cwd": "/tmp"}
   }
 }`
 	var output bytes.Buffer
@@ -105,7 +105,7 @@ func testBridgeDecision(t *testing.T, bridge *agyPermissionBridge, events <-chan
 	if event.RequestID == "" || event.ToolName != "run_command" {
 		t.Fatalf("event = %#v, want run_command permission request", event)
 	}
-	if event.ToolInput != "touch /tmp/permission-test" {
+	if event.ToolInput != `"touch /tmp/permission-test"` {
 		t.Fatalf("ToolInput = %q", event.ToolInput)
 	}
 
@@ -127,6 +127,40 @@ func testBridgeDecision(t *testing.T, bridge *agyPermissionBridge, events <-chan
 	}
 	if response.Decision != wantDecision || response.Reason != wantReason {
 		t.Fatalf("response = %#v, want decision=%q reason=%q", response, wantDecision, wantReason)
+	}
+	if strings.Join(response.PermissionOverrides, "\x00") != strings.Join(wantOverrides, "\x00") {
+		t.Fatalf("permission overrides = %q, want %q", response.PermissionOverrides, wantOverrides)
+	}
+}
+
+func TestPermissionOverridesFor_CommandTargets(t *testing.T) {
+	for _, tt := range []struct {
+		name, tool string
+		args       map[string]any
+		want       string
+	}{
+		{"plain", "run_command", map[string]any{"CommandLine": "git status"}, "command(git status)"},
+		{"quoted", "run_command", map[string]any{"CommandLine": `"git status"`}, "command(git status)"},
+		{"single_quoted", "run_command", map[string]any{"CommandLine": "'git status'"}, "command(git status)"},
+		{"preserve_shell_quotes", "run_command", map[string]any{"CommandLine": `"echo" "hello"`}, `command("echo" "hello")`},
+		{"empty", "run_command", map[string]any{"CommandLine": "  "}, ""},
+		{"missing", "run_command", nil, ""},
+		{"wrong_type", "run_command", map[string]any{"CommandLine": 12}, ""},
+		{"other_tool", "view_file", map[string]any{"CommandLine": "git status"}, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			input := agyHookInput{}
+			input.ToolCall.Name = tt.tool
+			input.ToolCall.Args = tt.args
+			got := permissionOverridesFor(input)
+			if tt.want == "" {
+				if len(got) != 0 {
+					t.Fatalf("overrides = %q, want none", got)
+				}
+			} else if len(got) != 1 || got[0] != tt.want {
+				t.Fatalf("overrides = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

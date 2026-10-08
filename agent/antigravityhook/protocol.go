@@ -24,8 +24,9 @@ type BridgeRequest struct {
 }
 
 type BridgeResponse struct {
-	Decision string `json:"decision"`
-	Reason   string `json:"reason,omitempty"`
+	Decision            string   `json:"decision"`
+	Reason              string   `json:"reason,omitempty"`
+	PermissionOverrides []string `json:"permissionOverrides,omitempty"`
 }
 
 // Relay forwards one Agy hook invocation to the owning cc-connect session.
