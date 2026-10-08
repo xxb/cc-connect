@@ -270,14 +270,18 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 		// to the still-running target engine, not the canceled request.
 		rm.sendToGroup(targetEngine.ctx, targetEngine, platform, groupSessionKey, label)
 	}
-	response, err := targetEngine.handleRelay(relayCtx, req.From, req.SessionKey, req.Message, onLateResult)
+	var visibleResponse string
+	response, err := targetEngine.handleRelay(relayCtx, req.From, req.SessionKey, req.Message, onLateResult, func(text string) {
+		visibleResponse = text
+	})
 	if err != nil {
 		return nil, fmt.Errorf("relay: %w", err)
 	}
 
 	// Post the response to the group chat for visibility.
-	if targetEngine != nil && visibility != RelayVisibilityNone {
-		label := relayVisibilityResponseLabel(visibility, toName, response)
+	// Tool output remains available to the caller, but is not a group reply.
+	if targetEngine != nil && visibility != RelayVisibilityNone && visibleResponse != "" {
+		label := relayVisibilityResponseLabel(visibility, toName, visibleResponse)
 		rm.sendToGroup(ctx, targetEngine, platform, groupSessionKey, label)
 	}
 

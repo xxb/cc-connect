@@ -16320,10 +16320,10 @@ func (e *Engine) relayContextForSourceSessionKey(fromProject, sourceSessionKey s
 // dedicated relay session, sends the message to the agent, and blocks until
 // the complete response is collected (or the relay context times out).
 func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey, message string) (string, error) {
-	return e.handleRelay(ctx, fromProject, sourceSessionKey, message, nil)
+	return e.handleRelay(ctx, fromProject, sourceSessionKey, message, nil, nil)
 }
 
-func (e *Engine) handleRelay(ctx context.Context, fromProject, sourceSessionKey, message string, onLateResult func(string, error)) (string, error) {
+func (e *Engine) handleRelay(ctx context.Context, fromProject, sourceSessionKey, message string, onLateResult func(string, error), onVisibleResponse func(string)) (string, error) {
 	agent, sessions, relaySessionKey, err := e.relayContextForSourceSessionKey(fromProject, sourceSessionKey)
 	if err != nil {
 		return "", err
@@ -16392,6 +16392,15 @@ func (e *Engine) handleRelay(ctx context.Context, fromProject, sourceSessionKey,
 	}
 
 	var textParts, responseParts []string
+	var visibleResponse string
+	defer func() {
+		if onVisibleResponse != nil {
+			if visibleResponse == "" {
+				visibleResponse = strings.Join(responseParts, "")
+			}
+			onVisibleResponse(visibleResponse)
+		}
+	}()
 	for event := range agentSession.Events() {
 		switch event.Type {
 		case EventText:
@@ -16420,6 +16429,7 @@ func (e *Engine) handleRelay(ctx context.Context, fromProject, sourceSessionKey,
 				saveRelaySessionID(currentID, true)
 			}
 			resp := event.Content
+			visibleResponse = event.Content
 			if resp == "" && len(textParts) > 0 {
 				resp = strings.Join(textParts, "")
 			}
